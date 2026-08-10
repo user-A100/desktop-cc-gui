@@ -628,11 +628,12 @@ describe("useThreadTurnEvents", () => {
     expect(workspaceScopedHas(pendingInterruptsRef.current, "ws-1", "thread-1")).toBe(false);
   });
 
-  it("drains externalized Grok text before marking the assistant message final", () => {
+  it("settles externalized live full text before marking the assistant message final", () => {
     const threadId = "grok:session-1";
     const itemId = "assistant-1";
     const shellText = "直接";
     const tailText = "说我眼睛里扫到的东西";
+    const fullText = `${shellText}${tailText}`;
     const { result, dispatch } = makeOptions({
       activeTurnIdByThread: { [threadId]: "turn-1" },
     });
@@ -646,23 +647,26 @@ describe("useThreadTurnEvents", () => {
     const actions = dispatch.mock.calls.map(
       ([action]) => action as ThreadAction,
     );
-    const drainIndex = actions.findIndex(
-      (action) => action.type === "appendAgentDelta",
+    const settleIndex = actions.findIndex(
+      (action) => action.type === "completeAgentMessage",
     );
     const finalIndex = actions.findIndex(
       (action) => action.type === "markLatestAssistantMessageFinal",
     );
-    expect(actions[drainIndex]).toEqual({
-      type: "appendAgentDelta",
-      workspaceId: "ws-1",
-      threadId,
-      itemId,
-      delta: tailText,
-      hasCustomName: true,
-    });
-    expect(drainIndex).toBeLessThan(finalIndex);
+    expect(actions[settleIndex]).toEqual(
+      expect.objectContaining({
+        type: "completeAgentMessage",
+        workspaceId: "ws-1",
+        threadId,
+        itemId,
+        text: fullText,
+        hasCustomName: true,
+      }),
+    );
+    expect(settleIndex).toBeLessThan(finalIndex);
     expect(getLiveAssistantTextSnapshot(threadId)).toBeNull();
 
+    // 仅有建壳首段时，终局 complete 也必须用通道全文盖住壳碎片。
     const shellItem: ConversationItem = {
       id: itemId,
       kind: "message",
@@ -676,7 +680,7 @@ describe("useThreadTurnEvents", () => {
     };
     const textSettlementActions = actions.filter(
       (action) =>
-        action.type === "appendAgentDelta" ||
+        action.type === "completeAgentMessage" ||
         action.type === "markLatestAssistantMessageFinal",
     );
     const settledState = textSettlementActions.reduce<ThreadState>(
@@ -688,7 +692,61 @@ describe("useThreadTurnEvents", () => {
       id: itemId,
       kind: "message",
       role: "assistant",
-      text: `${shellText}${tailText}`,
+      text: fullText,
+      isFinal: true,
+    });
+  });
+
+  it("settles full live text even when reducer never received the shell first delta", () => {
+    // 回归：首 delta 未进 reducer（只在 live 通道），旧 tail-only drain 会
+    // 新建「无壳」item 或留下空壳「已」；重开历史才完整。
+    const threadId = "claude:session-shell-missing";
+    const itemId = "assistant-live";
+    const shellText = "已";
+    const tailText = "把方案定稿：接口与字段直接写死。";
+    const fullText = `${shellText}${tailText}`;
+    const { result, dispatch } = makeOptions({
+      activeTurnIdByThread: { [threadId]: "turn-1" },
+    });
+    appendLiveAssistantText(threadId, itemId, shellText);
+    appendLiveAssistantText(threadId, itemId, tailText);
+
+    act(() => {
+      result.current.onTurnCompleted("ws-1", threadId, "turn-1");
+    });
+
+    const actions = dispatch.mock.calls.map(
+      ([action]) => action as ThreadAction,
+    );
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "completeAgentMessage",
+          threadId,
+          itemId,
+          text: fullText,
+        }),
+      ]),
+    );
+
+    const baseState: ThreadState = {
+      ...initialState,
+      itemsByThread: { [threadId]: [] },
+    };
+    const settledState = actions
+      .filter(
+        (action) =>
+          action.type === "completeAgentMessage" ||
+          action.type === "markLatestAssistantMessageFinal",
+      )
+      .reduce<ThreadState>(
+        (state, action) => threadReducer(state, action),
+        baseState,
+      );
+    const settledItem = settledState.itemsByThread[threadId]?.[0];
+    expect(settledItem).toMatchObject({
+      id: itemId,
+      text: fullText,
       isFinal: true,
     });
   });

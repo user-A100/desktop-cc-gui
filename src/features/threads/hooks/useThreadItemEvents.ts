@@ -36,7 +36,6 @@ import {
   clearLiveAssistantText,
   drainLiveAssistantTextTail,
   drainLiveAssistantTextTailIfItemChanged,
-  peekLiveAssistantText,
   resolveLiveAssistantSettlementText,
   updateLiveAssistantTextSnapshot,
 } from "../utils/liveAssistantTextChannel";
@@ -1793,46 +1792,46 @@ export function useThreadItemEvents({
       });
       flushRealtimeDeltaOps();
       if (isRealtimeTurnTerminal(threadId, turnId)) {
-        // 回合已 terminal：turn settle 通常已 drain。若通道仍有残留（竞态），
-        // 仍须把更长终稿写入 durable state，避免 UI 卡在壳首段。
+        // 回合已 terminal：turn settle 通常已把 live 全文落盘。
+        // 仍须无条件把 settledText 写入 durable state——不能依赖 residual 仍在：
+        // 1) resolve 时通道有全文，随后 turn 已 clear；2) provider 终稿本身完整
+        // 但 residual 为空。旧逻辑「仅 residual 存在才 salvage」会在 isStreaming
+        // 结束后只剩建壳首段（如「已」），重开历史才恢复。
         if (LIVE_TEXT_EXTERNALIZATION_ENABLED && settledText) {
-          const residual = peekLiveAssistantText(threadId);
-          if (residual?.text) {
-            const timestamp = Date.now();
-            dispatch({
-              type: "ensureThread",
-              workspaceId,
-              threadId,
-              engine: inferEngineFromThreadId(threadId),
-            });
-            dispatch({
-              type: "flushAgentCompletedBatch",
-              workspaceId,
-              threadId,
-              itemId,
-              text: settledText,
-              hasCustomName: Boolean(getCustomName(workspaceId, threadId)),
-              timestamp,
-              isActiveThread: threadId === activeThreadId,
-            });
-            clearLiveAssistantText(threadId);
-            recordThreadActivity(workspaceId, threadId, timestamp);
-            safeMessageActivity();
-            onAgentMessageCompletedExternal?.({
-              workspaceId,
-              threadId,
-              ...(turnId ? { turnId } : {}),
-              itemId,
-              text: settledText,
-            });
-            logClaudeStream("agent-completed-terminal-salvage", {
-              workspaceId,
-              threadId,
-              itemId,
-              deltaLength: settledText.length,
-              textPreview: createDebugPreview(settledText),
-            });
-          }
+          const timestamp = Date.now();
+          dispatch({
+            type: "ensureThread",
+            workspaceId,
+            threadId,
+            engine: inferEngineFromThreadId(threadId),
+          });
+          dispatch({
+            type: "flushAgentCompletedBatch",
+            workspaceId,
+            threadId,
+            itemId,
+            text: settledText,
+            hasCustomName: Boolean(getCustomName(workspaceId, threadId)),
+            timestamp,
+            isActiveThread: threadId === activeThreadId,
+          });
+          clearLiveAssistantText(threadId);
+          recordThreadActivity(workspaceId, threadId, timestamp);
+          safeMessageActivity();
+          onAgentMessageCompletedExternal?.({
+            workspaceId,
+            threadId,
+            ...(turnId ? { turnId } : {}),
+            itemId,
+            text: settledText,
+          });
+          logClaudeStream("agent-completed-terminal-salvage", {
+            workspaceId,
+            threadId,
+            itemId,
+            deltaLength: settledText.length,
+            textPreview: createDebugPreview(settledText),
+          });
         }
         return;
       }

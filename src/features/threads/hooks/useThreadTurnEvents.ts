@@ -32,7 +32,8 @@ import type { TurnExecutionSnapshot } from "../../shared-session/target/types";
 import { hasCodexBackgroundHelperPreview } from "../utils/codexBackgroundHelpers";
 import { isCodexPrewarmThreadStart } from "../utils/codexPendingPrewarm";
 import {
-  drainLiveAssistantTextTail,
+  clearLiveAssistantText,
+  peekLiveAssistantText,
   renameLiveAssistantTextThread,
 } from "../utils/liveAssistantTextChannel";
 import { resolveCodexSubagentIdentity } from "../utils/codexSubagentIdentity";
@@ -499,18 +500,22 @@ export function useThreadTurnEvents({
         return false;
       }
       safeTargets.forEach(({ threadId: targetThreadId }) => {
-        // A4 live-text 外部化：terminal settlement 前把尚未落入 reducer 的尾段
-        // 回灌到同一 assistant item。否则 isStreaming 关闭后只能读到建壳首段。
-        const liveTextTail = drainLiveAssistantTextTail(targetThreadId);
-        if (liveTextTail) {
+        // A4 live-text 外部化：terminal settlement 必须把通道内「全文」一次写入
+        // durable item。只 append shell 后尾段时，若 shell 首 delta 未进 reducer
+        // 或 shellTextLength 失真，isStreaming 关闭后 UI 会只剩「已」「**」这类
+        // 建壳碎片，重开历史才恢复（用户截图中的典型形态）。
+        const liveEntry = peekLiveAssistantText(targetThreadId);
+        if (liveEntry?.text) {
           dispatch({
-            type: "appendAgentDelta",
+            type: "completeAgentMessage",
             workspaceId,
             threadId: targetThreadId,
-            itemId: liveTextTail.itemId,
-            delta: liveTextTail.tailDelta,
+            itemId: liveEntry.itemId,
+            text: liveEntry.text,
             hasCustomName: true,
+            timestamp: Date.now(),
           });
+          clearLiveAssistantText(targetThreadId);
         }
         dispatch({
           type: "clearProcessingGeneratedImages",

@@ -10,6 +10,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildConversationItem } from "../../../utils/threadItems";
 import {
+  clearLiveAssistantText,
   getLiveAssistantTextSnapshot,
   LIVE_ASSISTANT_TEXT_PUBLISH_INTERVAL_MS,
   peekLiveAssistantText,
@@ -361,5 +362,44 @@ describe("useThreadItemEvents live-text segmentation", () => {
       }),
     );
     expect(peekLiveAssistantText(THREAD_ID)).toBeNull();
+  });
+
+  it("salvages provider final text after turn already cleared the live channel", () => {
+    // 回归：turn 已 clear 通道，旧 salvage 要求 residual 存在而直接 return，
+    // 即使 provider complete 带着完整终稿也不会写入 → 界面只剩建壳「已」。
+    const { result, dispatch } = makeHook();
+    const fullText = "已把方案定稿：接口与字段直接写死。";
+
+    act(() => {
+      result.current.noteRealtimeTurnStarted(THREAD_ID, "turn-1");
+      result.current.onAgentMessageDelta({
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        itemId: ITEM_ID,
+        delta: "已",
+      });
+      result.current.markRealtimeTurnTerminal(THREAD_ID, "turn-1");
+      // 模拟 turn settle 已 clear 通道
+      clearLiveAssistantText(THREAD_ID);
+    });
+
+    dispatch.mockClear();
+
+    act(() => {
+      result.current.onAgentMessageCompleted({
+        workspaceId: WORKSPACE_ID,
+        threadId: THREAD_ID,
+        itemId: ITEM_ID,
+        text: fullText,
+        turnId: "turn-1",
+      });
+    });
+
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "flushAgentCompletedBatch",
+        text: fullText,
+      }),
+    );
   });
 });

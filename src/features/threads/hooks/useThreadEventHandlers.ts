@@ -42,6 +42,10 @@ import type { ThreadEventHandlersOptions } from "./threadEventHandlerTypes";
 import type { TurnExecutionSnapshot } from "../../shared-session/target/types";
 import { handleThreadAppServerEventDiagnostics } from "./threadAppServerEventDiagnostics";
 import {
+  clearLiveAssistantText,
+  peekLiveAssistantText,
+} from "../utils/liveAssistantTextChannel";
+import {
   TURN_FIRST_DELTA_WARNING_MS,
   TURN_STALL_WARNING_MS,
   applyActiveExecutionItemEvent,
@@ -2004,6 +2008,21 @@ export function useThreadEventHandlers({
           lifecycle.activeTurnId === null ||
           lifecycle.activeTurnId === normalizedTurnId;
         if (canFallbackSettle) {
+          // 与 onTurnCompleted 主路径一致：fallback settle 也必须先把 live 全文
+          // 写入 durable state，否则 markProcessing(false) 后 UI 只剩建壳首段。
+          const liveEntry = peekLiveAssistantText(threadId);
+          if (liveEntry?.text) {
+            dispatch({
+              type: "completeAgentMessage",
+              workspaceId,
+              threadId,
+              itemId: liveEntry.itemId,
+              text: liveEntry.text,
+              hasCustomName: true,
+              timestamp: Date.now(),
+            });
+            clearLiveAssistantText(threadId);
+          }
           dispatch({
             type: "clearProcessingGeneratedImages",
             threadId,
