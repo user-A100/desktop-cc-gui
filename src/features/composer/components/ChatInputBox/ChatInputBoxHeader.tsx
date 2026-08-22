@@ -101,7 +101,7 @@ export function ChatInputBoxHeader({
       {messageQueue && messageQueue.length > 0 && (
         <MessageQueue
           queue={messageQueue}
-          onRemove={onRemoveFromQueue ?? (() => false)}
+          onRemove={onRemoveFromQueue ?? (() => {})}
           onFuse={onFuseFromQueue}
           canFuse={canFuseFromQueue}
           fuseDisabledReasonKey={fuseDisabledReasonKey}
