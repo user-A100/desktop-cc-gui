@@ -266,11 +266,16 @@ async fn record_auto_session_metadata_if_present(
     let (Some(session_id), Some(metadata)) = (session_id, metadata) else {
         return;
     };
+    let session_id = if session_id.starts_with(&format!("{engine_prefix}:")) {
+        session_id.to_string()
+    } else {
+        format!("{engine_prefix}:{session_id}")
+    };
     let _ = session_management::record_auto_session_metadata_core(
         &state.workspaces,
         state.storage_path.as_path(),
         workspace_id.to_string(),
-        format!("{engine_prefix}:{session_id}"),
+        session_id,
         metadata,
     )
     .await;
@@ -1517,24 +1522,24 @@ pub async fn get_engine_models(
             Ok(fresh_status.models)
         }
         EngineType::Qoder => {
-            let config = manager.get_engine_config(EngineType::Qoder).await;
-            let custom_bin = config
-                .as_ref()
-                .and_then(|cfg| cfg.bin_path.as_ref())
-                .map(|s| s.as_str());
-            let fresh_status = super::status::detect_qoder_status_with_home(
-                custom_bin,
-                config.as_ref().and_then(|cfg| cfg.home_dir.as_deref()),
+            let qoder_distribution_settings =
+                super::qoder_provider_profile::QoderDistributionSettings::from_app_settings(
+                    &settings,
+                );
+            let launch_profile =
+                super::qoder_provider_profile::resolve_qoder_provider_launch_profile(
+                    "model-catalog",
+                    provider_profile_id.as_deref(),
+                    &qoder_distribution_settings,
+                )?;
+            // Qoder catalog is scoped by distribution. Do not fall back to the
+            // engine-wide status cache: that cache describes Global only.
+            let fresh_status = super::status::detect_qoder_distribution_status(
+                launch_profile.distribution,
+                launch_profile.bin_path.as_deref(),
+                launch_profile.home_dir.as_deref().and_then(|path| path.to_str()),
             )
             .await;
-            if !fresh_status.models.is_empty() {
-                return Ok(fresh_status.models);
-            }
-            if let Some(cached) = manager.get_engine_status(EngineType::Qoder).await {
-                if !cached.models.is_empty() {
-                    return Ok(cached.models);
-                }
-            }
             Ok(fresh_status.models)
         }
         EngineType::Grok => {
@@ -1630,30 +1635,38 @@ fn build_provider_engine_dispatch_receipt(
     model: Option<&str>,
     reasoning_effort: Option<&str>,
 ) -> Value {
-    let canonical_provider_profile_id = provider_profile_id.filter(|profile_id| {
-        !matches!(
-            (engine, *profile_id),
-            (
-                EngineType::Kimi,
-                super::kimi_provider_profile::KIMI_LOCAL_PROVIDER_PROFILE_ID
-            ) | (
-                EngineType::Grok,
-                super::grok_provider_profile::GROK_LOCAL_PROVIDER_PROFILE_ID
-            ) | (
-                EngineType::OpenCode,
-                super::opencode_provider_profile::OPENCODE_LOCAL_PROVIDER_PROFILE_ID
-            ) | (
-                EngineType::Dsh,
-                super::dsh_provider_profile::DSH_LOCAL_PROVIDER_PROFILE_ID
-            ) | (
-                EngineType::Pi,
-                super::pi_provider_profile::PI_LOCAL_PROVIDER_PROFILE_ID
-            ) | (
-                EngineType::Qoder,
-                super::qoder_provider_profile::QODER_LOCAL_PROVIDER_PROFILE_ID
-            )
+    let canonical_provider_profile_id = if engine == EngineType::Qoder {
+        // Qoder Global/CN are fixed runtime distributions. Convert a legacy
+        // empty/local binding to Global so the durable receipt never loses the
+        // boundary that selected the binary, config directory, and PAT.
+        super::qoder_provider_profile::qoder_distribution_from_provider_profile_id(
+            provider_profile_id,
         )
-    });
+        .ok()
+        .map(|distribution| distribution.provider_profile_id())
+    } else {
+        provider_profile_id.filter(|profile_id| {
+            !matches!(
+                (engine, *profile_id),
+                (
+                    EngineType::Kimi,
+                    super::kimi_provider_profile::KIMI_LOCAL_PROVIDER_PROFILE_ID
+                ) | (
+                    EngineType::Grok,
+                    super::grok_provider_profile::GROK_LOCAL_PROVIDER_PROFILE_ID
+                ) | (
+                    EngineType::OpenCode,
+                    super::opencode_provider_profile::OPENCODE_LOCAL_PROVIDER_PROFILE_ID
+                ) | (
+                    EngineType::Dsh,
+                    super::dsh_provider_profile::DSH_LOCAL_PROVIDER_PROFILE_ID
+                ) | (
+                    EngineType::Pi,
+                    super::pi_provider_profile::PI_LOCAL_PROVIDER_PROFILE_ID
+                )
+            )
+        })
+    };
     json!({
         "engine": engine.icon(),
         "providerProfileId": canonical_provider_profile_id,
@@ -3208,23 +3221,28 @@ pub async fn engine_send_message(
                     "qoder",
                     provider_profile_id.as_deref(),
                 )?;
+            let qoder_distribution_settings =
+                super::qoder_provider_profile::QoderDistributionSettings::from_app_settings(
+                    &settings,
+                );
             let provider_launch_profile =
                 super::qoder_provider_profile::resolve_qoder_provider_launch_profile(
                     &workspace_id,
                     effective_provider_profile_id.as_deref(),
-                    None,
+                    &qoder_distribution_settings,
                 )?;
             let session = manager
                 .get_or_create_qoder_session_for_runtime(
                     &workspace_id,
                     &workspace_path,
-                    &provider_launch_profile.runtime_key,
-                    provider_launch_profile.home_dir.as_deref(),
+                    &provider_launch_profile,
                 )
                 .await;
 
-            let normalized_fork_session_id =
-                super::qoder::normalize_qoder_fork_session_id(fork_session_id.as_deref())?;
+            let normalized_fork_session_id = super::qoder::normalize_qoder_fork_session_id(
+                fork_session_id.as_deref(),
+                Some(provider_launch_profile.distribution.provider_profile_id()),
+            )?;
             let resolved_session_id = if normalized_fork_session_id.is_some() {
                 None
             } else {
@@ -3232,7 +3250,8 @@ pub async fn engine_send_message(
                     continue_session,
                     session_id,
                     session.get_session_id().await,
-                )
+                    Some(provider_launch_profile.distribution.provider_profile_id()),
+                )?
             };
             let response_session_id = resolved_session_id.clone();
             let runtime_model = model
@@ -3268,6 +3287,21 @@ pub async fn engine_send_message(
 
             let turn_id = format!("qoder-turn-{}", uuid::Uuid::new_v4());
             let thread_id = thread_id.unwrap_or_else(|| turn_id.clone());
+            let binding_session_id = response_session_id
+                .as_deref()
+                .or(provider_binding_lookup_session_id.as_deref())
+                .unwrap_or(turn_id.as_str());
+            if let Some(binding) = provider_launch_profile.binding.as_ref() {
+                crate::session_management::record_engine_provider_binding_core(
+                    &state.workspaces,
+                    state.storage_path.as_path(),
+                    workspace_id.clone(),
+                    binding_session_id.to_string(),
+                    "qoder".to_string(),
+                    binding.clone(),
+                )
+                .await?;
+            }
             let item_id = format!("qoder-item-{}", uuid::Uuid::new_v4());
 
             let mut receiver = session.subscribe();
@@ -3276,7 +3310,12 @@ pub async fn engine_send_message(
             let item_id_clone = item_id.clone();
             let turn_id_for_forwarder = turn_id.clone();
             let mut accumulated_agent_text = String::new();
+            let provider_binding_for_forwarder = provider_launch_profile.binding.clone();
+            let provider_binding_storage_path = state.storage_path.clone();
+            let provider_binding_workspace_id = workspace_id.clone();
             let provider_runtime_key_for_forwarder = provider_launch_profile.runtime_key.clone();
+            let qoder_provider_profile_id_for_forwarder =
+                provider_launch_profile.distribution.provider_profile_id();
             let mut native_session_id_for_forwarder = response_session_id
                 .clone()
                 .or_else(|| provider_binding_lookup_session_id.clone());
@@ -3300,6 +3339,25 @@ pub async fn engine_send_message(
                     }
 
                     let event = turn_event.event;
+                    if let (
+                        Some(binding),
+                        EngineEvent::SessionStarted {
+                            session_id,
+                            engine: EngineType::Qoder,
+                            ..
+                        },
+                    ) = (provider_binding_for_forwarder.as_ref(), &event)
+                    {
+                        if !session_id.is_empty() && session_id != "pending" {
+                            crate::session_management::schedule_engine_provider_binding_record(
+                                provider_binding_storage_path.clone(),
+                                provider_binding_workspace_id.clone(),
+                                session_id.clone(),
+                                "qoder".to_string(),
+                                binding.clone(),
+                            );
+                        }
+                    }
                     let is_terminal = event.is_terminal();
                     let render_lane = match &event {
                         EngineEvent::TextDelta { .. } => GeminiRenderLane::Text,
@@ -3375,7 +3433,17 @@ pub async fn engine_send_message(
                     {
                         if !session_id.is_empty() && session_id != "pending" {
                             if matches!(engine, EngineType::Qoder) {
-                                current_thread_id = format!("qoder:{}", session_id);
+                                match super::qoder_provider_profile::canonical_qoder_native_session_id(
+                                    session_id,
+                                    Some(qoder_provider_profile_id_for_forwarder),
+                                ) {
+                                    Ok(identity) => current_thread_id = identity,
+                                    Err(error) => log::warn!(
+                                        "[qoder] ignored invalid SessionStarted identity for {}: {}",
+                                        qoder_provider_profile_id_for_forwarder,
+                                        error
+                                    ),
+                                }
                                 native_session_id_for_forwarder = Some(session_id.clone());
                             }
                         }
@@ -3397,14 +3465,25 @@ pub async fn engine_send_message(
             if let (Some(session_id), Some(metadata)) =
                 (response_session_id.as_deref(), auto_session.clone())
             {
-                record_auto_session_metadata_if_present(
-                    &state,
-                    &workspace_id,
-                    Some(session_id),
-                    Some(metadata),
-                    "qoder",
-                )
-                .await;
+                match super::qoder_provider_profile::canonical_qoder_native_session_id(
+                    session_id,
+                    Some(provider_launch_profile.distribution.provider_profile_id()),
+                ) {
+                    Ok(metadata_session_id) => {
+                        record_auto_session_metadata_if_present(
+                            &state,
+                            &workspace_id,
+                            Some(metadata_session_id.as_str()),
+                            Some(metadata),
+                            "qoder",
+                        )
+                        .await;
+                    }
+                    Err(error) => log::warn!(
+                        "[qoder] skipped auto-session metadata for invalid identity: {}",
+                        error
+                    ),
+                }
             }
 
             Ok(json!({
@@ -4308,22 +4387,27 @@ pub async fn engine_send_message_sync(
                     "qoder",
                     None,
                 )?;
+            let qoder_distribution_settings =
+                super::qoder_provider_profile::QoderDistributionSettings::from_app_settings(
+                    &settings,
+                );
             let provider_launch_profile =
                 super::qoder_provider_profile::resolve_qoder_provider_launch_profile(
                     &workspace_id,
                     effective_provider_profile_id.as_deref(),
-                    None,
+                    &qoder_distribution_settings,
                 )?;
             let session = manager
                 .get_or_create_qoder_session_for_runtime(
                     &workspace_id,
                     &workspace_path,
-                    &provider_launch_profile.runtime_key,
-                    provider_launch_profile.home_dir.as_deref(),
+                    &provider_launch_profile,
                 )
                 .await;
-            let normalized_fork_session_id =
-                super::qoder::normalize_qoder_fork_session_id(fork_session_id.as_deref())?;
+            let normalized_fork_session_id = super::qoder::normalize_qoder_fork_session_id(
+                fork_session_id.as_deref(),
+                Some(provider_launch_profile.distribution.provider_profile_id()),
+            )?;
             let resolved_session_id = if normalized_fork_session_id.is_some() {
                 None
             } else {
@@ -4331,7 +4415,8 @@ pub async fn engine_send_message_sync(
                     continue_session,
                     session_id,
                     session.get_session_id().await,
-                )
+                    Some(provider_launch_profile.distribution.provider_profile_id()),
+                )?
             };
             let runtime_model = model
                 .as_ref()
@@ -4363,10 +4448,37 @@ pub async fn engine_send_message_sync(
             .await
             .map_err(|_| "Qoder response timed out".to_string())??;
             let response_session_id = session.get_session_id().await;
+            if let Some(binding) = provider_launch_profile.binding.as_ref() {
+                let binding_session_id = response_session_id.as_deref().unwrap_or(turn_id.as_str());
+                crate::session_management::record_engine_provider_binding_core(
+                    &state.workspaces,
+                    state.storage_path.as_path(),
+                    workspace_id.clone(),
+                    binding_session_id.to_string(),
+                    "qoder".to_string(),
+                    binding.clone(),
+                )
+                .await?;
+            }
+            let metadata_session_id = response_session_id.as_deref().and_then(|session_id| {
+                match super::qoder_provider_profile::canonical_qoder_native_session_id(
+                    session_id,
+                    Some(provider_launch_profile.distribution.provider_profile_id()),
+                ) {
+                    Ok(identity) => Some(identity),
+                    Err(error) => {
+                        log::warn!(
+                            "[qoder] skipped auto-session metadata for invalid identity: {}",
+                            error
+                        );
+                        None
+                    }
+                }
+            });
             record_auto_session_metadata_if_present(
                 &state,
                 &workspace_id,
-                response_session_id.as_deref(),
+                metadata_session_id.as_deref(),
                 auto_session,
                 "qoder",
             )
@@ -4678,7 +4790,11 @@ pub async fn engine_interrupt_turn(
         }
         EngineType::Qoder => {
             manager
-                .interrupt_qoder_sessions(&workspace_id, Some(&turn_id))
+                .interrupt_qoder_session_for_profile(
+                    &workspace_id,
+                    provider_profile_id.as_deref(),
+                    Some(&turn_id),
+                )
                 .await
         }
         EngineType::Grok => {

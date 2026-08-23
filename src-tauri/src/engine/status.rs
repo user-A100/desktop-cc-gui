@@ -931,13 +931,14 @@ pub(crate) fn parse_qoder_status_json(stdout: &str) -> Option<bool> {
 }
 
 async fn probe_qoder_logged_in(
+    distribution: crate::engine::qoder_provider_profile::QoderDistribution,
     bin: &str,
     path_env: Option<&String>,
     home_dir: Option<&Path>,
 ) -> Option<bool> {
     let mut command = crate::backend::app_server::build_command_for_binary(bin);
     if let Some(home_dir) = home_dir {
-        command.env("QODER_HOME", home_dir);
+        command.env(distribution.config_dir_env_var(), home_dir);
         command.arg("--config-dir").arg(home_dir);
     }
     command.args(["status", "-o", "json"]);
@@ -946,7 +947,7 @@ async fn probe_qoder_logged_in(
     if let Some(path_env) = path_env {
         command.env("PATH", path_env);
     }
-    crate::engine::qoder_auth::apply_qoder_pat_env(&mut command);
+    crate::engine::qoder_auth::apply_qoder_pat_env_for_distribution(&mut command, distribution);
     let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
         .await
         .ok()?
@@ -961,12 +962,14 @@ async fn probe_qoder_logged_in(
 /// options) via a throwaway `qodercli --acp` handshake. Never blocks engine
 /// detection: any failure degrades to an empty catalog with a diagnostic.
 async fn get_qoder_models(
+    distribution: crate::engine::qoder_provider_profile::QoderDistribution,
     custom_bin: Option<&str>,
     home_dir: Option<&str>,
 ) -> (Vec<ModelInfo>, Option<String>) {
     let cwd = std::env::temp_dir();
     let cwd_string = cwd.to_string_lossy().to_string();
-    let result = crate::engine::qoder::run_qoder_acp_initialized(
+    let result = crate::engine::qoder::run_qoder_acp_initialized_for_distribution(
+        distribution,
         custom_bin,
         &cwd,
         home_dir,
@@ -1005,6 +1008,16 @@ async fn get_qoder_models(
 
 const QODER_MODEL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+fn scope_qoder_models_to_distribution(
+    distribution: crate::engine::qoder_provider_profile::QoderDistribution,
+    models: Vec<ModelInfo>,
+) -> Vec<ModelInfo> {
+    models
+        .into_iter()
+        .map(|model| model.with_provider_profile_id(distribution.provider_profile_id()))
+        .collect()
+}
+
 pub async fn detect_qoder_status(custom_bin: Option<&str>) -> EngineStatus {
     detect_qoder_status_with_home(custom_bin, None).await
 }
@@ -1013,21 +1026,38 @@ pub async fn detect_qoder_status_with_home(
     custom_bin: Option<&str>,
     configured_home_dir: Option<&str>,
 ) -> EngineStatus {
-    let bin_path = resolve_bin_path("qodercli", custom_bin);
+    detect_qoder_distribution_status(
+        crate::engine::qoder_provider_profile::QoderDistribution::Global,
+        custom_bin,
+        configured_home_dir,
+    )
+    .await
+}
+
+pub async fn detect_qoder_distribution_status(
+    distribution: crate::engine::qoder_provider_profile::QoderDistribution,
+    custom_bin: Option<&str>,
+    configured_home_dir: Option<&str>,
+) -> EngineStatus {
+    let cli_name = distribution.cli_name();
+    let bin_path = resolve_bin_path(cli_name, custom_bin);
     let bin = bin_path
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "qodercli".to_string());
+        .unwrap_or_else(|| cli_name.to_string());
     let path_env = build_codex_path_env(custom_bin);
-    let (installed, version, error) = probe_cli_version(&bin, "qodercli", path_env.as_ref()).await;
+    let (installed, version, error) = probe_cli_version(&bin, cli_name, path_env.as_ref()).await;
     if !installed {
         return not_installed_status(EngineType::Qoder, error);
     }
-    let home_dir = crate::engine::qoder_provider_profile::resolve_qoder_home_dir(
+    let home_dir = crate::engine::qoder_provider_profile::resolve_qoder_distribution_home_dir(
+        distribution,
         configured_home_dir.map(Path::new),
     );
-    let logged_in = probe_qoder_logged_in(&bin, path_env.as_ref(), home_dir.as_deref()).await;
-    let has_pat = crate::engine::qoder_auth::qoder_has_pat_credential();
+    let logged_in =
+        probe_qoder_logged_in(distribution, &bin, path_env.as_ref(), home_dir.as_deref()).await;
+    let has_pat =
+        crate::engine::qoder_auth::qoder_has_pat_credential_for_distribution(distribution);
     if logged_in == Some(false) && !has_pat {
         return EngineStatus {
             engine_type: EngineType::Qoder,
@@ -1038,11 +1068,16 @@ pub async fn detect_qoder_status_with_home(
             models: Vec::new(),
             default_model: None,
             features: EngineFeatures::qoder(),
-            error: Some("Qoder CLI 未登录：请先运行 qodercli login".to_string()),
+            error: Some(format!("Qoder CLI 未登录：请先运行 {} login", cli_name)),
         };
     }
-    let (models, config_diagnostic) =
-        get_qoder_models(Some(&bin), home_dir.as_deref().and_then(|p| p.to_str())).await;
+    let (models, config_diagnostic) = get_qoder_models(
+        distribution,
+        Some(&bin),
+        home_dir.as_deref().and_then(|p| p.to_str()),
+    )
+    .await;
+    let models = scope_qoder_models_to_distribution(distribution, models);
     let default_model = models.iter().find(|m| m.default).map(|m| m.id.clone());
     EngineStatus {
         engine_type: EngineType::Qoder,
@@ -2221,12 +2256,31 @@ pub async fn resolve_engine_type(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::qoder_provider_profile::{
+        QoderDistribution, QODER_CN_PROVIDER_PROFILE_ID, QODER_GLOBAL_PROVIDER_PROFILE_ID,
+    };
     use serde_json::json;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn qoder_catalog_rows_keep_the_requested_distribution_profile() {
+        let models = vec![ModelInfo::new("qoder-model", "Qoder model")];
+        let global = scope_qoder_models_to_distribution(QoderDistribution::Global, models.clone());
+        let cn = scope_qoder_models_to_distribution(QoderDistribution::Cn, models);
+
+        assert_eq!(
+            global[0].provider_profile_id.as_deref(),
+            Some(QODER_GLOBAL_PROVIDER_PROFILE_ID)
+        );
+        assert_eq!(
+            cn[0].provider_profile_id.as_deref(),
+            Some(QODER_CN_PROVIDER_PROFILE_ID)
+        );
+    }
 
     #[test]
     fn parse_pi_models_output_keeps_thinking_vision_and_default() {

@@ -7,6 +7,7 @@ import type { ReactNode } from 'react';
 import { CODEX_MODEL_CATALOG } from "../../../models/codexModelCatalog";
 import type { ComposerSendReadiness } from '../../utils/composerSendReadiness';
 import type { ExecutionTarget } from '../../../shared-session/target/types';
+import type { QoderSettingsHighlightTarget } from '../../../app/hooks/useSettingsModalState';
 
 // ============================================================
 // Core Entity Types
@@ -705,8 +706,10 @@ export interface ChatInputBoxProps {
   onOpenPromptSettings?: () => void;
   /** Open model settings (navigate to provider management to add models) */
   onOpenModelSettings?: (providerId?: string) => void;
-  /** Open CLI / provider settings management page */
-  onOpenCliSettings?: () => void;
+  /** Open CLI / provider settings management page. */
+  onOpenCliSettings?: (
+    highlightTarget?: QoderSettingsHighlightTarget,
+  ) => void;
   /** Open a selected @ file reference via the host file surface */
   onOpenFileReference?: (path: string) => void;
   /** Refresh current provider model/config snapshot */

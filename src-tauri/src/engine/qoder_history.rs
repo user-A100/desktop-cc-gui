@@ -15,10 +15,13 @@ use std::time::Duration;
 
 use super::qoder::{
     extract_content_text, extract_qoder_tool_call_id, extract_qoder_tool_content_text,
-    extract_qoder_tool_name, parse_acp_line, run_qoder_acp_initialized, AcpLine,
+    extract_qoder_tool_name, parse_acp_line, run_qoder_acp_initialized_for_distribution, AcpLine,
     QODER_DELETE_TIMEOUT, QODER_LIST_TIMEOUT, QODER_LOAD_TIMEOUT, QODER_RPC_HANDSHAKE_TIMEOUT,
 };
-use super::qoder_provider_profile::resolve_qoder_home_dir;
+use super::qoder_provider_profile::{
+    resolve_qoder_home_dir, resolve_qoder_provider_launch_profile, QoderDistributionSettings,
+    QoderProviderLaunchProfile,
+};
 
 const MAX_TITLE_CHARS: usize = 80;
 const MAX_QODER_PROJECT_DIR_SCAN: usize = 128;
@@ -52,6 +55,12 @@ pub struct QoderSessionSummary {
     pub canonical_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution_status: Option<String>,
+    /// Explicit for newly discovered Global/CN history. Historic callers may
+    /// still omit it; their compatibility resolver remains Global.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_profile_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +183,15 @@ fn qoder_projects_root(home_dir: Option<&str>) -> PathBuf {
     resolve_qoder_home_dir(home_dir.map(Path::new))
         .unwrap_or_else(|| PathBuf::from(".qoder"))
         .join("projects")
+}
+
+fn qoder_projects_root_for_launch_profile(
+    launch_profile: &QoderProviderLaunchProfile,
+) -> Option<PathBuf> {
+    launch_profile
+        .home_dir
+        .as_ref()
+        .map(|home| home.join("projects"))
 }
 
 fn is_sidechain_record(record: &Value) -> bool {
@@ -600,6 +618,8 @@ fn summarize_qoder_jsonl(path: &Path, session_id: &str) -> Option<QoderSessionSu
         engine: Some("qoder".to_string()),
         canonical_session_id: Some(session_id.to_string()),
         attribution_status: Some("strict-match".to_string()),
+        provider_profile_id: None,
+        provider_profile_name: None,
     })
 }
 
@@ -661,6 +681,71 @@ fn list_qoder_sessions_from_disk(
     home_dir: Option<&str>,
 ) -> (Vec<QoderSessionSummary>, bool) {
     let root = qoder_projects_root(home_dir);
+    if !root.is_dir() {
+        return (Vec::new(), false);
+    }
+    let mut sessions = Vec::new();
+    let mut seen = HashSet::new();
+    let mut found_workspace_source = false;
+    for slug in candidate_qoder_project_slugs(workspace_path) {
+        let dir = root.join(&slug);
+        if !dir.is_dir() {
+            continue;
+        }
+        found_workspace_source = true;
+        for summary in list_qoder_jsonl_in_dir(&dir) {
+            if seen.insert(summary.session_id.clone()) {
+                sessions.push(summary);
+            }
+        }
+    }
+    if sessions.is_empty() && !found_workspace_source {
+        if let Ok(entries) = fs::read_dir(&root) {
+            let mut scanned_dirs = 0usize;
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                scanned_dirs += 1;
+                if scanned_dirs > MAX_QODER_PROJECT_DIR_SCAN {
+                    break;
+                }
+                let Ok(files) = fs::read_dir(&dir) else {
+                    continue;
+                };
+                for file in files.flatten() {
+                    let path = file.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl")
+                        || !path.is_file()
+                        || !jsonl_cwd_matches(&path, workspace_path)
+                    {
+                        continue;
+                    }
+                    let Some(session_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                        continue;
+                    };
+                    if seen.insert(session_id.to_string()) {
+                        if let Some(summary) = summarize_qoder_jsonl(&path, session_id) {
+                            found_workspace_source = true;
+                            sessions.push(summary);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    (sessions, found_workspace_source)
+}
+
+fn list_qoder_sessions_from_disk_for_launch_profile(
+    workspace_path: &Path,
+    launch_profile: &QoderProviderLaunchProfile,
+) -> (Vec<QoderSessionSummary>, bool) {
+    let Some(root) = qoder_projects_root_for_launch_profile(launch_profile) else {
+        return (Vec::new(), false);
+    };
     if !root.is_dir() {
         return (Vec::new(), false);
     }
@@ -813,6 +898,8 @@ pub(crate) fn map_session_list_entries(
             engine: Some("qoder".to_string()),
             canonical_session_id: Some(session_id),
             attribution_status: Some("strict-match".to_string()),
+            provider_profile_id: None,
+            provider_profile_name: None,
         });
     }
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -1014,7 +1101,39 @@ where
         Box<dyn std::future::Future<Output = Result<T, String>> + Send + 'a>,
     >,
 {
-    run_qoder_acp_initialized(None, workspace_path, home_dir, timeout_dur, body).await
+    let settings = QoderDistributionSettings::default();
+    let mut launch_profile =
+        resolve_qoder_provider_launch_profile(&workspace_path.to_string_lossy(), None, &settings)?;
+    launch_profile.home_dir = home_dir.map(PathBuf::from);
+    with_initialized_acp_for_launch_profile(workspace_path, &launch_profile, timeout_dur, body)
+        .await
+}
+
+async fn with_initialized_acp_for_launch_profile<T, F>(
+    workspace_path: &Path,
+    launch_profile: &QoderProviderLaunchProfile,
+    timeout_dur: Duration,
+    body: F,
+) -> Result<T, String>
+where
+    F: for<'a> FnOnce(
+        &'a mut super::qoder::QoderAcpProcess,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, String>> + Send + 'a>,
+    >,
+{
+    run_qoder_acp_initialized_for_distribution(
+        launch_profile.distribution,
+        launch_profile.bin_path.as_deref(),
+        workspace_path,
+        launch_profile
+            .home_dir
+            .as_deref()
+            .and_then(|home| home.to_str()),
+        timeout_dur,
+        body,
+    )
+    .await
 }
 
 async fn list_qoder_sessions_from_acp(
@@ -1051,6 +1170,43 @@ async fn list_qoder_sessions_from_acp(
     }
 }
 
+async fn list_qoder_sessions_from_acp_for_launch_profile(
+    workspace_path: &Path,
+    limit: Option<usize>,
+    launch_profile: &QoderProviderLaunchProfile,
+) -> Result<Vec<QoderSessionSummary>, String> {
+    match with_initialized_acp_for_launch_profile(
+        workspace_path,
+        launch_profile,
+        QODER_LIST_TIMEOUT,
+        |acp| -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Value, String>> + Send + '_>,
+        > {
+            Box::pin(async move {
+                acp.request("session/list", json!({}), QODER_RPC_HANDSHAKE_TIMEOUT)
+                    .await
+            })
+        },
+    )
+    .await
+    {
+        Ok(result) => {
+            let mut sessions = map_session_list_entries(&result, workspace_path);
+            if let Some(limit) = limit {
+                sessions.truncate(limit);
+            }
+            Ok(sessions)
+        }
+        Err(error) => {
+            log::warn!(
+                "list_qoder_sessions {} ACP fallback failed: {error}",
+                launch_profile.distribution.runtime_segment()
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
 pub async fn list_qoder_sessions(
     workspace_path: &Path,
     limit: Option<usize>,
@@ -1060,6 +1216,30 @@ pub async fn list_qoder_sessions(
         list_qoder_sessions_from_disk(workspace_path, home_dir);
     if sessions.is_empty() && !found_workspace_source {
         sessions = list_qoder_sessions_from_acp(workspace_path, limit, home_dir).await?;
+    }
+    if let Some(limit) = limit {
+        sessions.truncate(limit);
+    }
+    Ok(sessions)
+}
+
+pub async fn list_qoder_sessions_for_launch_profile(
+    workspace_path: &Path,
+    limit: Option<usize>,
+    launch_profile: &QoderProviderLaunchProfile,
+) -> Result<Vec<QoderSessionSummary>, String> {
+    let (mut sessions, found_workspace_source) =
+        list_qoder_sessions_from_disk_for_launch_profile(workspace_path, launch_profile);
+    if sessions.is_empty() && !found_workspace_source {
+        sessions =
+            list_qoder_sessions_from_acp_for_launch_profile(workspace_path, limit, launch_profile)
+                .await?;
+    }
+    let binding = launch_profile.binding.as_ref();
+    for session in &mut sessions {
+        session.provider_profile_id = binding.map(|binding| binding.provider_profile_id.clone());
+        session.provider_profile_name =
+            binding.map(|binding| binding.provider_profile_name.clone());
     }
     if let Some(limit) = limit {
         sessions.truncate(limit);
@@ -1077,6 +1257,44 @@ async fn load_qoder_session_from_acp(
     let result = with_initialized_acp(
         workspace_path,
         home_dir,
+        QODER_LOAD_TIMEOUT,
+        move |acp| -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<Value>, String>> + Send + '_>,
+        > {
+            let workspace_owned = workspace_owned.clone();
+            let session_owned = session_owned.clone();
+            Box::pin(async move {
+                acp.request(
+                    "session/load",
+                    json!({
+                        "sessionId": session_owned,
+                        "cwd": workspace_owned.to_string_lossy(),
+                        "mcpServers": [],
+                    }),
+                    QODER_LOAD_TIMEOUT,
+                )
+                .await?;
+                Ok(acp.collected_updates.clone())
+            })
+        },
+    )
+    .await?;
+    Ok(QoderSessionLoadResult {
+        messages: project_replayed_updates(&result),
+        usage: None,
+    })
+}
+
+async fn load_qoder_session_from_acp_for_launch_profile(
+    workspace_path: &Path,
+    session_id: &str,
+    launch_profile: &QoderProviderLaunchProfile,
+) -> Result<QoderSessionLoadResult, String> {
+    let workspace_owned = workspace_path.to_path_buf();
+    let session_owned = session_id.to_string();
+    let result = with_initialized_acp_for_launch_profile(
+        workspace_path,
+        launch_profile,
         QODER_LOAD_TIMEOUT,
         move |acp| -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<Vec<Value>, String>> + Send + '_>,
@@ -1128,6 +1346,40 @@ pub async fn load_qoder_session(
     load_qoder_session_from_acp(workspace_path, &session_id, home_dir).await
 }
 
+pub async fn load_qoder_session_for_launch_profile(
+    workspace_path: &Path,
+    session_id: &str,
+    launch_profile: &QoderProviderLaunchProfile,
+) -> Result<QoderSessionLoadResult, String> {
+    let session_id = normalize_session_id(session_id)?;
+    let local_path = qoder_projects_root_for_launch_profile(launch_profile).and_then(|root| {
+        for slug in candidate_qoder_project_slugs(workspace_path) {
+            let candidate = root.join(slug).join(format!("{session_id}.jsonl"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        find_qoder_session_jsonl_by_workspace_metadata(&root, workspace_path, &session_id)
+    });
+    if let Some(path) = local_path {
+        match parse_qoder_jsonl_messages_checked(&path) {
+            Ok(messages) => {
+                return Ok(QoderSessionLoadResult {
+                    messages,
+                    usage: None,
+                });
+            }
+            Err(error) => log::warn!(
+                "Qoder {} native history is unavailable; falling back to its ACP: {} ({error})",
+                launch_profile.distribution.runtime_segment(),
+                path.display()
+            ),
+        }
+    }
+    load_qoder_session_from_acp_for_launch_profile(workspace_path, &session_id, launch_profile)
+        .await
+}
+
 pub async fn delete_qoder_session(
     workspace_path: &Path,
     session_id: &str,
@@ -1155,9 +1407,39 @@ pub async fn delete_qoder_session(
     .await
 }
 
+pub async fn delete_qoder_session_for_launch_profile(
+    workspace_path: &Path,
+    session_id: &str,
+    launch_profile: &QoderProviderLaunchProfile,
+) -> Result<(), String> {
+    let session_id = normalize_session_id(session_id)?;
+    with_initialized_acp_for_launch_profile(
+        workspace_path,
+        launch_profile,
+        QODER_DELETE_TIMEOUT,
+        |acp| -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>,
+        > {
+            Box::pin(async move {
+                acp.request(
+                    "session/delete",
+                    json!({ "sessionId": session_id }),
+                    QODER_RPC_HANDSHAKE_TIMEOUT,
+                )
+                .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::qoder_provider_profile::{
+        QODER_CN_PROVIDER_PROFILE_ID, QODER_GLOBAL_PROVIDER_PROFILE_ID,
+    };
     use serde_json::json;
 
     fn temporary_qoder_home(label: &str) -> PathBuf {
@@ -1322,6 +1604,80 @@ mod tests {
         assert_eq!(loaded.messages[3].kind, "tool");
 
         fs::remove_dir_all(&home).expect("remove temp Qoder home");
+    }
+
+    #[tokio::test]
+    async fn distribution_launch_profiles_never_cross_read_disk_history() {
+        let global_home = temporary_qoder_home("global-history");
+        let cn_home = temporary_qoder_home("cn-history");
+        let workspace = PathBuf::from("/tmp/mossx-qoder-history-distribution-isolation");
+        let storage_slug = encode_qoder_project_slug(&workspace.to_string_lossy());
+        write_workspace_session(
+            &global_home,
+            &storage_slug,
+            &workspace,
+            "same-raw-session",
+            false,
+        );
+        write_workspace_session(
+            &cn_home,
+            &storage_slug,
+            &workspace,
+            "same-raw-session",
+            false,
+        );
+
+        let settings = QoderDistributionSettings {
+            global_config_dir: Some(global_home.to_string_lossy().to_string()),
+            cn_config_dir: Some(cn_home.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let global_profile = resolve_qoder_provider_launch_profile(
+            "workspace",
+            Some(QODER_GLOBAL_PROVIDER_PROFILE_ID),
+            &settings,
+        )
+        .expect("Global launch profile");
+        let cn_profile = resolve_qoder_provider_launch_profile(
+            "workspace",
+            Some(QODER_CN_PROVIDER_PROFILE_ID),
+            &settings,
+        )
+        .expect("CN launch profile");
+
+        let global_sessions =
+            list_qoder_sessions_for_launch_profile(&workspace, None, &global_profile)
+                .await
+                .expect("Global disk history");
+        let cn_sessions = list_qoder_sessions_for_launch_profile(&workspace, None, &cn_profile)
+            .await
+            .expect("CN disk history");
+
+        assert_eq!(
+            global_sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["same-raw-session"],
+        );
+        assert_eq!(
+            cn_sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["same-raw-session"],
+        );
+        assert_eq!(
+            global_sessions[0].provider_profile_id.as_deref(),
+            Some(QODER_GLOBAL_PROVIDER_PROFILE_ID),
+        );
+        assert_eq!(
+            cn_sessions[0].provider_profile_id.as_deref(),
+            Some(QODER_CN_PROVIDER_PROFILE_ID),
+        );
+
+        fs::remove_dir_all(&global_home).expect("remove Global Qoder home");
+        fs::remove_dir_all(&cn_home).expect("remove CN Qoder home");
     }
 
     #[test]

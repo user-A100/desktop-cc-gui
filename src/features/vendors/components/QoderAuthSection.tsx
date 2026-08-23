@@ -1,7 +1,4 @@
-/**
- * Qoder CLI 认证区块：登录（qodercli login）与 PAT（setKey）拆开，布局对齐 PI。
- * Qoder 没有多供应商 catalog，只有一条 CLI 账号。
- */
+/** Qoder distribution 的登录/PAT 区块，布局对齐 PI。 */
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Eye from "lucide-react/dist/esm/icons/eye";
@@ -19,12 +16,38 @@ import { loadSettingsStyles } from "../../../styles/featureStyleLoaders";
 import { useFeatureStylesReady } from "../../../styles/useFeatureStylesReady";
 import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import { CliIcon } from "./cliEngineNav";
+import { QODER_GLOBAL_PROVIDER_PROFILE_ID } from "../../threads/constants/codexProviderProfiles";
 
-function quoteBin(bin: string): string {
-  return bin.includes(" ") ? `"${bin}"` : bin;
+function quoteTerminalArg(value: string): string {
+  // requestTerminalCommand runs through the user's shell. Keep plain CLI paths
+  // readable, but quote every other value with POSIX-safe single quotes. Keep
+  // an explicit home-prefix expandable so the terminal command matches Rust's
+  // configured config-root normalization.
+  if (value === "~") {
+    return "$HOME";
+  }
+  if (value.startsWith("~/")) {
+    return `$HOME/${quoteTerminalArg(value.slice(2))}`;
+  }
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
+type QoderAuthSectionProps = {
+  qoderBin?: string | null;
+  configDir?: string | null;
+  providerProfileId?: string;
+  cliName?: string;
+};
+
+export function QoderAuthSection({
+  qoderBin,
+  configDir,
+  providerProfileId = QODER_GLOBAL_PROVIDER_PROFILE_ID,
+  cliName = "qodercli",
+}: QoderAuthSectionProps) {
   useFeatureStylesReady(loadSettingsStyles);
   const { t } = useTranslation();
   const [snapshot, setSnapshot] = useState<QoderAuthStatus | null>(null);
@@ -35,15 +58,18 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const isGlobal = providerProfileId === QODER_GLOBAL_PROVIDER_PROFILE_ID;
+  const authFileName = isGlobal ? "qoder-auth.json" : "qoder-cn-auth.json";
+  const defaultAuthFilePath = `~/.ccgui/${authFileName}`;
 
   const refresh = useCallback(async () => {
     try {
-      setSnapshot(await qoderAuthStatus());
+      setSnapshot(await qoderAuthStatus(providerProfileId));
       setLoadError(null);
     } catch (error) {
       setLoadError(String(error));
     }
-  }, []);
+  }, [providerProfileId]);
 
   useEffect(() => {
     void refresh();
@@ -75,13 +101,23 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
 
   const handleLaunchLogin = useCallback(() => {
     const customBin = qoderBin?.trim();
-    const command = customBin ? quoteBin(customBin) : "qodercli";
+    const command = customBin ? quoteTerminalArg(customBin) : cliName;
+    const configuredDirectory = configDir?.trim();
     requestTerminalCommand({
-      terminalId: "qoder-login",
-      title: "qodercli login",
-      command: `${command} login`,
+      terminalId:
+        isGlobal ? "qoder-login" : "qoder-cn-login",
+      title: `${cliName} login`,
+      command: [
+        command,
+        configuredDirectory
+          ? `--config-dir ${quoteTerminalArg(configuredDirectory)}`
+          : null,
+        "login",
+      ]
+        .filter(Boolean)
+        .join(" "),
     });
-  }, [qoderBin]);
+  }, [cliName, configDir, isGlobal, qoderBin]);
 
   const handleSave = useCallback(async () => {
     const key = draftKey.trim();
@@ -92,7 +128,7 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
     setSaving(true);
     setActionError(null);
     try {
-      await qoderAuthSetPat(key);
+      await qoderAuthSetPat(key, providerProfileId);
       closeEditor();
       await refresh();
     } catch (error) {
@@ -100,18 +136,18 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
     } finally {
       setSaving(false);
     }
-  }, [draftKey, closeEditor, refresh]);
+  }, [draftKey, closeEditor, providerProfileId, refresh]);
 
   const handleDelete = useCallback(async () => {
     try {
-      await qoderAuthDeletePat();
+      await qoderAuthDeletePat(providerProfileId);
       setConfirmDelete(false);
       await refresh();
     } catch (error) {
       setConfirmDelete(false);
       setActionError(String(error));
     }
-  }, [refresh]);
+  }, [providerProfileId, refresh]);
 
   const state = snapshot?.state ?? "none";
   const envVar = snapshot?.envVar ?? "QODER_PERSONAL_ACCESS_TOKEN";
@@ -130,8 +166,9 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
         <span
           className="pi-auth-status pi-auth-status-env"
           title={t("settings.vendor.qoderAuth.envActiveHint", {
+            cliName,
             defaultValue:
-              "环境变量生效中（mossx 启动 qodercli 时继承）。如需覆盖，请设置 PAT。",
+              `环境变量生效中（mossx 启动 ${cliName} 时继承）。如需覆盖，请设置 PAT。`,
           })}
         >
           <span className="pi-auth-dot" aria-hidden />
@@ -157,7 +194,8 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
         </span>
         <span className="pi-auth-subhead-hint">
           {t("settings.vendor.qoderAuth.loginHint", {
-            defaultValue: "在内嵌终端运行 qodercli login，完成浏览器授权",
+            cliName,
+            defaultValue: `在内嵌终端运行 ${cliName} login，完成浏览器授权`,
           })}
         </span>
       </div>
@@ -167,10 +205,11 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
             <CliIcon id="qoder" label="Qoder" monochrome />
           </span>
           <div className="pi-auth-row-copy">
-            <div className="pi-auth-row-name">Qoder CLI</div>
+            <div className="pi-auth-row-name">{cliName}</div>
             <div className="pi-auth-row-desc">
               {t("settings.vendor.qoderAuth.loginDesc", {
-                defaultValue: "账号登录 · 浏览器授权后由 qodercli 自管 token",
+                cliName,
+                defaultValue: `账号登录 · 浏览器授权后由 ${cliName} 自管 token`,
               })}
             </div>
           </div>
@@ -193,7 +232,9 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
         </span>
         <span className="pi-auth-subhead-hint">
           {t("settings.vendor.qoderAuth.apiKeyHint", {
-            defaultValue: "写入 ~/.ccgui/qoder-auth.json，启动时注入环境变量",
+            authFile: defaultAuthFilePath,
+            envVar,
+            defaultValue: `写入 ${defaultAuthFilePath}，启动时注入 ${envVar}`,
           })}
         </span>
       </div>
@@ -333,7 +374,9 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
                 </button>
                 <span className="pi-auth-save-hint">
                   {t("settings.vendor.qoderAuth.saveHint", {
-                    defaultValue: "保存后写入 ~/.ccgui/qoder-auth.json（0600），启动 qodercli 时注入",
+                    authFile: defaultAuthFilePath,
+                    cliName,
+                    defaultValue: `保存后写入 ${defaultAuthFilePath}（0600），启动 ${cliName} 时注入`,
                   })}
                 </span>
               </div>
@@ -341,12 +384,14 @@ export function QoderAuthSection({ qoderBin }: { qoderBin?: string | null }) {
           ) : null}
         </div>
         <div className="pi-auth-foot">
-          <code>{snapshot?.authFile.path ?? "~/.ccgui/qoder-auth.json"}</code>
+          <code>{snapshot?.authFile.path ?? defaultAuthFilePath}</code>
           <span className="pi-auth-perm-badge">0600</span>
           <span className="pi-auth-foot-spacer" />
           <span className="pi-auth-foot-prio">
             {t("settings.vendor.qoderAuth.resolutionOrder", {
-              defaultValue: "解析顺序：进程环境变量 → qoder-auth.json → qodercli login",
+              authFile: authFileName,
+              cliName,
+              defaultValue: `解析顺序：进程环境变量 → ${authFileName} → ${cliName} login`,
             })}
           </span>
         </div>

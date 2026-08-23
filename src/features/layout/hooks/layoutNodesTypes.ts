@@ -1,5 +1,6 @@
 import type { DragEvent, MouseEvent, ReactNode, RefObject } from "react";
 import type { ProjectMapDatasetController } from "../../project-map";
+import type { QoderSettingsHighlightTarget } from "../../app/hooks/useSettingsModalState";
 import type {
   IntentCanvasCodeSelectionAnchor,
   IntentCanvasDocument,
@@ -711,7 +712,9 @@ export type LayoutNodesFlatOptions = {
   onOpenAgentSettings: () => void;
   onOpenPromptSettings: () => void;
   onOpenModelSettings: (providerId?: string) => void;
-  onOpenCliSettings: () => void;
+  onOpenCliSettings: (
+    highlightTarget?: QoderSettingsHighlightTarget,
+  ) => void;
   onRefreshModelConfig?: (providerId?: string) => Promise<void> | void;
   isModelConfigRefreshing?: boolean;
   opencodeVariantOptions: string[];

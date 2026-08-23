@@ -930,6 +930,14 @@ pub(crate) struct AppSettings {
     pub(crate) dsh_bin: Option<String>,
     #[serde(default, rename = "qoderBin")]
     pub(crate) qoder_bin: Option<String>,
+    /// Qoder Global configuration directory. `qoderBin` remains the Global
+    /// binary for backward compatibility.
+    #[serde(default, rename = "qoderConfigDir")]
+    pub(crate) qoder_config_dir: Option<String>,
+    #[serde(default, rename = "qoderCnBin")]
+    pub(crate) qoder_cn_bin: Option<String>,
+    #[serde(default, rename = "qoderCnConfigDir")]
+    pub(crate) qoder_cn_config_dir: Option<String>,
     #[serde(default, rename = "dshHost")]
     pub(crate) dsh_host: Option<String>,
     #[serde(default, rename = "dshPort")]
@@ -2044,6 +2052,9 @@ impl Default for AppSettings {
             pi_bin: None,
             dsh_bin: None,
             qoder_bin: None,
+            qoder_config_dir: None,
+            qoder_cn_bin: None,
+            qoder_cn_config_dir: None,
             dsh_host: None,
             dsh_port: None,
             dsh_auto_start: None,

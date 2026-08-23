@@ -154,7 +154,7 @@ export function resetThreadMessagingTestMocks() {
 }
 
 export function makeThreadMessagingHook(
-  activeEngine: "claude" | "codex" | "gemini" | "grok" | "kimi" | "opencode" | "pi",
+  activeEngine: "claude" | "codex" | "gemini" | "grok" | "kimi" | "opencode" | "pi" | "qoder",
   overrides: {
     workspace?: WorkspaceInfo;
     activeThreadId?: string | null;
@@ -164,7 +164,7 @@ export function makeThreadMessagingHook(
     codexAcceptedTurnByThread?: Record<string, CodexAcceptedTurnRecord>;
     threadEngineById?: Record<
       string,
-      "claude" | "codex" | "gemini" | "grok" | "kimi" | "opencode" | "pi" | undefined
+      "claude" | "codex" | "gemini" | "grok" | "kimi" | "opencode" | "pi" | "qoder" | undefined
     >;
     providerProfileByThread?: Record<string, string | null | undefined>;
     itemsByThread?: Record<string, ConversationItem[]>;

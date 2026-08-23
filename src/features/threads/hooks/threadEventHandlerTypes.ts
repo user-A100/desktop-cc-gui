@@ -74,6 +74,10 @@ export type ThreadEventHandlersOptions = {
     turnId: string | null | undefined,
   ) => string | null;
   getActiveTurnIdForThread?: (threadId: string) => string | null;
+  getThreadProviderProfileId?: (
+    workspaceId: string,
+    threadId: string,
+  ) => string | null | undefined;
   hasEstablishedThreadItems?: (threadId: string) => boolean;
   renamePendingMemoryCaptureKey: (
     oldThreadId: string,

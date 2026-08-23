@@ -48,6 +48,8 @@ mod git_utils;
 mod rpc_params;
 #[path = "../snapshot_throttle.rs"]
 mod snapshot_throttle;
+#[path = "../shared_binding_visibility.rs"]
+mod shared_binding_visibility;
 // `local_usage.rs` is shared with the desktop Tauri app and references
 // `crate::state::AppState` in command wrappers. The daemon only reuses the
 // workspace-backed filesystem helpers, so a minimal stub keeps the shared
@@ -164,18 +166,19 @@ mod session_index {
     }
 }
 // session_management now catalogs/deletes shared sessions via crate::shared_sessions.
-// The desktop app gets the full module from lib.rs; the daemon only needs the pure
-// filesystem list/delete surface, so keep a minimal local adapter here instead of
-// pulling shared_event_log + full Tauri command graph into the daemon crate.
+// The desktop app gets the full module from lib.rs; the daemon keeps a small local
+// adapter and only uses the shared read-only V2 binding projection. It never pulls
+// SharedEventWriter or the full Tauri command graph into the daemon crate.
 #[allow(dead_code)]
 mod shared_sessions {
-    use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::{Path, PathBuf};
 
     use serde::{Deserialize, Serialize};
 
     use crate::app_paths;
     use crate::engine::EngineType;
+    use crate::shared_binding_visibility::collect_v2_shared_binding_ids_by_session;
 
     const SHARED_SESSIONS_DIRNAME: &str = "shared-sessions";
 
@@ -202,6 +205,13 @@ mod shared_sessions {
 
     #[derive(Debug, Clone, Deserialize)]
     #[serde(rename_all = "camelCase")]
+    struct SharedTargetBindingLite {
+        #[serde(default)]
+        native_thread_id: String,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct SharedSessionMetaLite {
         id: String,
         title: String,
@@ -211,6 +221,8 @@ mod shared_sessions {
         selected_engine: EngineType,
         #[serde(default)]
         bindings_by_engine: HashMap<EngineType, SharedEngineBindingLite>,
+        #[serde(default)]
+        bindings_by_target: HashMap<String, SharedTargetBindingLite>,
     }
 
     fn shared_sessions_root_dir() -> Result<PathBuf, String> {
@@ -265,21 +277,23 @@ mod shared_sessions {
         serde_json::from_str(&raw).map_err(|error| error.to_string())
     }
 
-    /// Placeholder for the desktop app's SharedEventWriter slot.
-    /// Daemon catalog call sites always pass `None`.
+    /// 占位 desktop app 的 `SharedEventWriter` 参数槽。
+    /// daemon catalog 调用点始终传 `None`，并使用第三个参数提供的只读 V2
+    /// binding projection。
     pub(crate) struct SharedEventWriter;
 
-    /// Daemon catalog path always passes `None` for the event-writer slot used by
-    /// the desktop app; keep the same arity so call sites stay source-compatible.
+    /// 保持 desktop signature，使 Shared Session Management 调用点 source-compatible，
+    /// 同时 daemon catalog 保持只读。
     pub(crate) fn list_workspace_shared_sessions(
         workspace_id: &str,
-        _event_writer: Option<&SharedEventWriter>,
+        event_writer: Option<&SharedEventWriter>,
+        event_log_path: Option<&Path>,
     ) -> Result<Vec<SharedSessionSummary>, String> {
         let directory = workspace_shared_sessions_dir(workspace_id)?;
         if !directory.exists() {
             return Ok(Vec::new());
         }
-        let mut summaries = Vec::new();
+        let mut session_metas = Vec::new();
         for entry in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
             let file_type = entry.file_type().map_err(|error| error.to_string())?;
@@ -291,11 +305,50 @@ mod shared_sessions {
                 Ok(meta) => meta,
                 Err(_) => continue,
             };
+            session_metas.push(meta);
+        }
+
+        let v2_native_thread_ids_by_session = if event_writer.is_none() {
+            let shared_session_ids = session_metas
+                .iter()
+                .map(|meta| meta.id.clone())
+                .collect::<Vec<_>>();
+            match event_log_path {
+                Some(path) => {
+                    match collect_v2_shared_binding_ids_by_session(path, &shared_session_ids) {
+                        Ok(ids_by_session) => ids_by_session,
+                        Err(error) => {
+                            log::warn!(
+                                "[cc_gui_daemon.shared_sessions] read-only V2 binding recovery failed for workspace {}: {}",
+                                workspace_id,
+                                error
+                            );
+                            BTreeMap::new()
+                        }
+                    }
+                }
+                None => BTreeMap::new(),
+            }
+        } else {
+            BTreeMap::new()
+        };
+
+        let mut summaries = Vec::with_capacity(session_metas.len());
+        for meta in session_metas {
             let mut native_thread_ids = meta
                 .bindings_by_engine
                 .values()
                 .map(|binding| binding.native_thread_id.clone())
                 .collect::<Vec<_>>();
+            native_thread_ids.extend(
+                meta.bindings_by_target
+                    .values()
+                    .map(|binding| binding.native_thread_id.clone())
+                    .filter(|native_thread_id| !native_thread_id.trim().is_empty()),
+            );
+            if let Some(v2_native_thread_ids) = v2_native_thread_ids_by_session.get(&meta.id) {
+                native_thread_ids.extend(v2_native_thread_ids.iter().cloned());
+            }
             native_thread_ids.sort();
             native_thread_ids.dedup();
             summaries.push(SharedSessionSummary {
@@ -366,7 +419,7 @@ mod codex {
         run_claude_doctor_with_settings, run_codex_doctor_with_settings,
         run_dsh_doctor_with_settings, run_grok_doctor_with_settings, run_kimi_doctor_with_settings,
         run_opencode_doctor_with_settings, run_pi_doctor_with_settings,
-        run_qoder_doctor_with_settings,
+        run_qoder_doctor_for_profile_with_settings, run_qoder_doctor_with_settings,
     };
     pub(crate) use crate::codex_installer::{
         build_cli_install_plan_with_backend, resolve_cli_version_status,
@@ -1897,7 +1950,28 @@ async fn handle_rpc_request(
         }
         "qoder_doctor" => {
             let qoder_bin = parse_optional_string(&params, "qoderBin");
-            state.qoder_doctor(qoder_bin).await
+            let provider_profile_id = parse_optional_string(&params, "providerProfileId");
+            state.qoder_doctor(qoder_bin, provider_profile_id).await
+        }
+        "qoder_auth_status" => {
+            let provider_profile_id = parse_optional_string(&params, "providerProfileId")
+                .or_else(|| parse_optional_string(&params, "distribution"));
+            state.qoder_auth_status(provider_profile_id).await
+        }
+        "qoder_auth_set_pat" => {
+            let key = parse_string(&params, "key")?;
+            let provider_profile_id = parse_optional_string(&params, "providerProfileId")
+                .or_else(|| parse_optional_string(&params, "distribution"));
+            state
+                .qoder_auth_set_pat(key, provider_profile_id)
+                .await?;
+            Ok(json!({ "ok": true }))
+        }
+        "qoder_auth_delete_pat" => {
+            let provider_profile_id = parse_optional_string(&params, "providerProfileId")
+                .or_else(|| parse_optional_string(&params, "distribution"));
+            state.qoder_auth_delete_pat(provider_profile_id).await?;
+            Ok(json!({ "ok": true }))
         }
         "ensure_dsh_host" => state.ensure_dsh_host().await,
         "cancel_dsh_host" => state.cancel_dsh_host().await,
@@ -2180,7 +2254,15 @@ async fn handle_rpc_request(
         "list_qoder_sessions" => {
             let workspace_path = parse_string(&params, "workspacePath")?;
             let limit = parse_optional_u32(&params, "limit").map(|value| value as usize);
-            state.list_qoder_sessions(workspace_path, limit).await
+            let provider_profile_id = parse_optional_string(&params, "providerProfileId");
+            state
+                .list_qoder_sessions(workspace_path, limit, provider_profile_id)
+                .await
+        }
+        "list_shared_sessions" => {
+            let workspace_id = parse_string(&params, "workspaceId")?;
+            let sessions = state.list_shared_sessions(workspace_id).await?;
+            serde_json::to_value(sessions).map_err(|err| err.to_string())
         }
         "list_workspace_sessions" => {
             let workspace_id = parse_string(&params, "workspaceId")?;
@@ -2376,7 +2458,10 @@ async fn handle_rpc_request(
         "load_qoder_session" => {
             let workspace_path = parse_string(&params, "workspacePath")?;
             let session_id = parse_string(&params, "sessionId")?;
-            state.load_qoder_session(workspace_path, session_id).await
+            let provider_profile_id = parse_optional_string(&params, "providerProfileId");
+            state
+                .load_qoder_session(workspace_path, session_id, provider_profile_id)
+                .await
         }
         "load_codex_session" => {
             let workspace_id = parse_string(&params, "workspaceId")?;
@@ -2410,8 +2495,9 @@ async fn handle_rpc_request(
         "delete_qoder_session" => {
             let workspace_path = parse_string(&params, "workspacePath")?;
             let session_id = parse_string(&params, "sessionId")?;
+            let provider_profile_id = parse_optional_string(&params, "providerProfileId");
             state
-                .delete_qoder_session(workspace_path, session_id)
+                .delete_qoder_session(workspace_path, session_id, provider_profile_id)
                 .await?;
             Ok(json!({ "ok": true }))
         }
@@ -2881,6 +2967,15 @@ mod ccgui_repair_regression_tests {
         assert!(
             daemon_dispatch.contains("\"load_codex_session\" =>"),
             "daemon dispatch is missing load_codex_session"
+        );
+    }
+
+    #[test]
+    fn daemon_dispatch_exposes_shared_session_listing() {
+        let daemon_dispatch = include_str!("cc_gui_daemon.rs");
+        assert!(
+            daemon_dispatch.contains("\"list_shared_sessions\" =>"),
+            "daemon dispatch is missing list_shared_sessions"
         );
     }
 }

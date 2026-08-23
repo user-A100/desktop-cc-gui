@@ -789,6 +789,117 @@ describe("useSidebarMenus", () => {
     ]);
   });
 
+  it("creates Qoder sessions from explicit Global/CN distribution children", async () => {
+    const handlers = createHandlers();
+    handlers.engineOptions = [
+      ...handlers.engineOptions,
+      {
+        type: "qoder",
+        displayName: "Qoder CLI",
+        shortName: "Qoder CLI",
+        installed: true,
+        version: "1.0.0",
+        error: null,
+        availabilityState: "ready",
+        availabilityLabelKey: null,
+      },
+    ];
+    const { result } = renderHook(() => useSidebarMenus(handlers));
+
+    await act(async () => {
+      result.current.showWorkspaceMenu(
+        {
+          clientX: 160,
+          clientY: 120,
+          preventDefault: vi.fn(),
+          stopPropagation: vi.fn(),
+        } as unknown as Parameters<typeof result.current.showWorkspaceMenu>[0],
+        workspace,
+      );
+    });
+
+    const qoderAction = result.current.workspaceMenuState?.groups
+      .find((group) => group.id === "new-session")
+      ?.actions.find((action) => action.id === "new-session-qoder");
+
+    expect(qoderAction?.children?.map((child) => child.id)).toEqual([
+      "new-session-qoder-distribution-__qoder_global__",
+      "new-session-qoder-distribution-__qoder_cn__",
+    ]);
+    expect(qoderAction?.submenuOnly).toBe(true);
+
+    await act(async () => {
+      await qoderAction?.onSelect();
+    });
+    expect(handlers.onAddAgent).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await qoderAction?.children
+        ?.find(
+          (child) =>
+            child.id === "new-session-qoder-distribution-__qoder_cn__",
+        )
+        ?.onSelect();
+    });
+
+    expect(handlers.onAddAgent).toHaveBeenCalledWith(
+      workspace,
+      "qoder",
+      expect.objectContaining({
+        providerProfileId: "__qoder_cn__",
+        providerProfile: {
+          id: "__qoder_cn__",
+          name: "Qoder CN",
+          source: "managed",
+        },
+      }),
+    );
+  });
+
+  it("keeps the CN child reachable when the Global-only engine status is unavailable", async () => {
+    const handlers = createHandlers();
+    handlers.engineOptions = [
+      ...handlers.engineOptions,
+      {
+        type: "qoder",
+        displayName: "Qoder CLI",
+        shortName: "Qoder CLI",
+        installed: false,
+        version: null,
+        error: "qodercli not found",
+        availabilityState: "unavailable",
+        availabilityLabelKey: null,
+      },
+    ];
+    const { result } = renderHook(() => useSidebarMenus(handlers));
+
+    await act(async () => {
+      result.current.showWorkspaceMenu(
+        {
+          clientX: 120,
+          clientY: 120,
+          preventDefault: vi.fn(),
+          stopPropagation: vi.fn(),
+        } as unknown as Parameters<typeof result.current.showWorkspaceMenu>[0],
+        workspace,
+      );
+    });
+
+    const qoderAction = result.current.workspaceMenuState?.groups
+      .find((group) => group.id === "new-session")
+      ?.actions.find((action) => action.id === "new-session-qoder");
+    const globalChild = qoderAction?.children?.find(
+      (child) => child.id === "new-session-qoder-distribution-__qoder_global__",
+    );
+    const cnChild = qoderAction?.children?.find(
+      (child) => child.id === "new-session-qoder-distribution-__qoder_cn__",
+    );
+
+    expect(qoderAction?.unavailable).toBe(false);
+    expect(globalChild?.unavailable).toBe(true);
+    expect(cnChild?.unavailable).toBe(false);
+  });
+
   it("remembers the last picked Codex provider for direct main-entry creation", async () => {
     window.localStorage.removeItem("codexLastProviderProfileId");
     const handlers = createHandlers();

@@ -10,6 +10,10 @@ use crate::backend::app_server::{
 };
 use crate::backend::app_server_cli::{check_opencode_cli_binary, resolve_safe_opencode_binary};
 use crate::codex::launch_profile::resolve_global_codex_launch_profile;
+use crate::engine::qoder_provider_profile::{
+    qoder_distribution_from_provider_profile_id, resolve_qoder_provider_launch_profile,
+    QoderDistribution, QoderDistributionSettings,
+};
 use crate::types::AppSettings;
 
 async fn probe_node_runtime(path_env: Option<&String>) -> (bool, Option<String>, Option<String>) {
@@ -386,17 +390,42 @@ pub(crate) async fn run_qoder_doctor_with_settings(
     qoder_bin: Option<String>,
     settings: &AppSettings,
 ) -> Result<Value, String> {
-    let default_bin = settings.qoder_bin.clone();
-    let resolved = qoder_bin
+    run_qoder_doctor_for_profile_with_settings(qoder_bin, None, settings).await
+}
+
+pub(crate) async fn run_qoder_doctor_for_profile_with_settings(
+    qoder_bin: Option<String>,
+    provider_profile_id: Option<String>,
+    settings: &AppSettings,
+) -> Result<Value, String> {
+    let distribution = qoder_distribution_from_provider_profile_id(provider_profile_id.as_deref())?;
+    let mut distribution_settings = QoderDistributionSettings::from_app_settings(settings);
+    if let Some(custom_bin) = qoder_bin
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .or(default_bin);
-    let requested_bin = match crate::engine::qoder::resolve_qodercli_bin(resolved.as_deref()) {
+    {
+        match distribution {
+            QoderDistribution::Global => distribution_settings.global_bin = Some(custom_bin),
+            QoderDistribution::Cn => distribution_settings.cn_bin = Some(custom_bin),
+        }
+    }
+    let launch_profile = resolve_qoder_provider_launch_profile(
+        "qoder-doctor",
+        provider_profile_id.as_deref(),
+        &distribution_settings,
+    )?;
+    let resolved = launch_profile.bin_path.clone();
+    let requested_bin = match crate::engine::qoder::resolve_qoder_distribution_bin(
+        distribution,
+        resolved.as_deref(),
+    ) {
         Ok(bin) => bin,
         Err(error) => {
             return Ok(json!({
                 "ok": false,
                 "codexBin": resolved,
+                "qoderDistribution": distribution.runtime_segment(),
+                "cliName": distribution.cli_name(),
                 "version": Value::Null,
                 "appServerOk": false,
                 "details": error,
@@ -425,9 +454,15 @@ pub(crate) async fn run_qoder_doctor_with_settings(
         return Ok(json!({
             "ok": false,
             "codexBin": resolved,
+            "qoderDistribution": distribution.runtime_segment(),
+            "cliName": distribution.cli_name(),
             "version": Value::Null,
             "appServerOk": false,
-            "details": "qoderBin must point to qodercli, not the Qoder IDE launcher (qoder)",
+            "details": format!(
+                "{} must point to {}, not the Qoder IDE launcher (qoder)",
+                if distribution == QoderDistribution::Global { "qoderBin" } else { "qoderCnBin" },
+                distribution.cli_name(),
+            ),
             "path": Value::Null,
             "nodeOk": false,
             "nodeVersion": Value::Null,
@@ -460,24 +495,41 @@ pub(crate) async fn run_qoder_doctor_with_settings(
     let (node_ok, node_version, node_details) = probe_node_runtime(path_env.as_ref()).await;
     let environment_diagnosis =
         build_engine_environment_diagnosis("qoder", Some(requested_bin.as_str()), &debug_info);
-    let home = crate::engine::status::get_qoder_home_dir();
+    let home = launch_profile.home_dir.clone();
     let home_exists = home.as_ref().map(|p| p.is_dir()).unwrap_or(false);
     let logged_in = if version.is_some() {
         crate::engine::status::parse_qoder_status_json(
-            &probe_qoder_status_json(&requested_bin, path_env.as_ref())
+            &probe_qoder_status_json(
+                &requested_bin,
+                path_env.as_ref(),
+                distribution,
+                home.as_ref().and_then(|path| path.to_str()),
+            )
                 .await
                 .unwrap_or_default(),
         )
     } else {
         None
     };
-    if logged_in == Some(false) && !crate::engine::qoder_auth::qoder_has_pat_credential() {
-        cli_error = Some("Qoder CLI 未登录：请先运行 qodercli login".to_string());
+    if logged_in == Some(false)
+        && !crate::engine::qoder_auth::qoder_has_pat_credential_for_distribution(distribution)
+    {
+        cli_error = Some(format!(
+            "Qoder {} CLI 未登录：请先运行 {} login",
+            distribution.runtime_segment(),
+            distribution.cli_name(),
+        ));
     }
     let acp_handshake = if version.is_some()
-        && (logged_in != Some(false) || crate::engine::qoder_auth::qoder_has_pat_credential())
+        && (logged_in != Some(false)
+            || crate::engine::qoder_auth::qoder_has_pat_credential_for_distribution(distribution))
     {
-        probe_qoder_acp_handshake(&requested_bin, home.as_ref().and_then(|p| p.to_str())).await
+        probe_qoder_acp_handshake(
+            &requested_bin,
+            distribution,
+            home.as_ref().and_then(|path| path.to_str()),
+        )
+        .await
     } else {
         Value::Null
     };
@@ -487,9 +539,12 @@ pub(crate) async fn run_qoder_doctor_with_settings(
         .unwrap_or(false);
     Ok(json!({
         "ok": version.is_some()
-            && (logged_in != Some(false) || crate::engine::qoder_auth::qoder_has_pat_credential())
+            && (logged_in != Some(false)
+                || crate::engine::qoder_auth::qoder_has_pat_credential_for_distribution(distribution))
             && (acp_handshake.is_null() || acp_ok),
         "codexBin": resolved,
+        "qoderDistribution": distribution.runtime_segment(),
+        "cliName": distribution.cli_name(),
         "version": version,
         "appServerOk": acp_ok,
         "details": cli_error,
@@ -514,15 +569,23 @@ pub(crate) async fn run_qoder_doctor_with_settings(
     }))
 }
 
-async fn probe_qoder_status_json(binary: &str, path_env: Option<&String>) -> Option<String> {
+async fn probe_qoder_status_json(
+    binary: &str,
+    path_env: Option<&String>,
+    distribution: QoderDistribution,
+    home_dir: Option<&str>,
+) -> Option<String> {
     let mut command = crate::utils::async_command(binary);
     if let Some(path_env) = path_env {
         command.env("PATH", path_env);
     }
+    if let Some(home_dir) = home_dir.map(str::trim).filter(|value| !value.is_empty()) {
+        command.env(distribution.config_dir_env_var(), home_dir);
+    }
     command.args(["status", "-o", "json"]);
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::null());
-    crate::engine::qoder_auth::apply_qoder_pat_env(&mut command);
+    crate::engine::qoder_auth::apply_qoder_pat_env_for_distribution(&mut command, distribution);
     let output = timeout(Duration::from_secs(10), command.output())
         .await
         .ok()?
@@ -533,9 +596,14 @@ async fn probe_qoder_status_json(binary: &str, path_env: Option<&String>) -> Opt
     Some(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-async fn probe_qoder_acp_handshake(binary: &str, home_dir: Option<&str>) -> Value {
+async fn probe_qoder_acp_handshake(
+    binary: &str,
+    distribution: QoderDistribution,
+    home_dir: Option<&str>,
+) -> Value {
     let cwd = std::env::temp_dir();
-    match crate::engine::qoder::run_qoder_acp_initialized(
+    match crate::engine::qoder::run_qoder_acp_initialized_for_distribution(
+        distribution,
         Some(binary),
         &cwd,
         home_dir,

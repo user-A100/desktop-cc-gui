@@ -2118,6 +2118,7 @@ describe('ChatInputBoxAdapter toggle bridge', () => {
 
     const latest = mockState.latestProps as {
       providerAvailability?: Record<string, boolean>;
+      providerStatusLabels?: Record<string, string | null>;
     };
 
     expect(latest.providerAvailability).toMatchObject({
@@ -2131,6 +2132,7 @@ describe('ChatInputBoxAdapter toggle bridge', () => {
       qoder: true,
       pi: true,
     });
+    expect(latest.providerStatusLabels?.qoder).toBeNull();
   });
 
   it('keeps gemini and opencode provider options enabled outside shared sessions', async () => {

@@ -131,17 +131,32 @@ fn provider_engine_dispatch_receipt_normalizes_qoder_local_sentinel() {
     let receipt = build_provider_engine_dispatch_receipt(
         crate::engine::EngineType::Qoder,
         Some(crate::engine::qoder_provider_profile::QODER_LOCAL_PROVIDER_PROFILE_ID),
-        "workspace-local",
+        "workspace-local::qoder::global",
         Some("qoder/auto"),
         None,
     );
 
     assert_eq!(receipt["engine"], "qoder");
-    assert!(receipt["providerProfileId"].is_null());
-    assert_eq!(receipt["providerProfileSource"], "local");
-    assert_eq!(receipt["providerRuntimeKey"], "workspace-local");
+    assert_eq!(receipt["providerProfileId"], "__qoder_global__");
+    assert_eq!(receipt["providerProfileSource"], "managed");
+    assert_eq!(receipt["providerRuntimeKey"], "workspace-local::qoder::global");
     assert_eq!(receipt["model"], "qoder/auto");
     assert!(receipt["reasoningEffort"].is_null());
+}
+
+#[test]
+fn provider_engine_dispatch_receipt_preserves_qoder_cn_distribution() {
+    let receipt = build_provider_engine_dispatch_receipt(
+        crate::engine::EngineType::Qoder,
+        Some(crate::engine::qoder_provider_profile::QODER_CN_PROVIDER_PROFILE_ID),
+        "workspace-cn::qoder::cn",
+        Some("qoder-cn/auto"),
+        None,
+    );
+
+    assert_eq!(receipt["providerProfileId"], "__qoder_cn__");
+    assert_eq!(receipt["providerProfileSource"], "managed");
+    assert_eq!(receipt["providerRuntimeKey"], "workspace-cn::qoder::cn");
 }
 
 #[test]

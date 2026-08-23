@@ -67,6 +67,26 @@ describe("sessionIndex pending drafts", () => {
     });
   });
 
+  it("keeps a canonical Qoder id intact for Rust-side profile validation", async () => {
+    writeClientCreatedSessionIndex({
+      engine: "qoder",
+      sessionId: "qoder:__qoder_cn__:same-raw-session",
+      workspacePath: "/tmp/ws",
+      providerProfileId: "__qoder_cn__",
+    });
+    await flushIndexWrite();
+
+    expect(invoke).toHaveBeenCalledWith("upsert_session_index_rows", {
+      rows: [
+        expect.objectContaining({
+          engine: "qoder",
+          sessionId: "qoder:__qoder_cn__:same-raw-session",
+          providerProfileId: "__qoder_cn__",
+        }),
+      ],
+    });
+  });
+
   it("tombstones a remapped pending Index row and ignores non-pending ids", async () => {
     scheduleTombstoneLocalPendingDraftIndexRow(
       "claude:claude-pending-1787016153035-0bittx",

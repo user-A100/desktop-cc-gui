@@ -207,6 +207,40 @@ describe("modelSelection", () => {
     ).toBe("gork-zhu/grok-4.6");
   });
 
+  it("keeps a Qoder thread model when the leftover Global/CN catalog does not match", () => {
+    expect(
+      getEffectiveSelectedModelId({
+        activeEngine: "qoder",
+        selectedModelId: "other-dist-default",
+        activeThreadSelectedModelId: "qoder-coder-v1",
+        hasActiveThread: true,
+        allowUnknownActiveThreadModel: true,
+        codexModels,
+        engineModelsAsOptions: [
+          createModel("other-dist-default", { isDefault: true }),
+        ],
+        engineSelectedModelIdByType: {},
+      }),
+    ).toBe("qoder-coder-v1");
+  });
+
+  it("still repairs a Qoder unknown id to catalog default without allowUnknown", () => {
+    expect(
+      getEffectiveSelectedModelId({
+        activeEngine: "qoder",
+        selectedModelId: null,
+        activeThreadSelectedModelId: "qoder-coder-v1",
+        hasActiveThread: true,
+        allowUnknownActiveThreadModel: false,
+        codexModels,
+        engineModelsAsOptions: [
+          createModel("other-dist-default", { isDefault: true }),
+        ],
+        engineSelectedModelIdByType: {},
+      }),
+    ).toBe("other-dist-default");
+  });
+
   it("still falls back Claude unknown ids to catalog default unless allowUnknown", () => {
     expect(
       getEffectiveSelectedModelId({

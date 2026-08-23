@@ -424,6 +424,72 @@
                 session_id: "019fe705-27fd-712e-a1be-f972ef3773f3".to_string()
             }
         );
+        assert_eq!(
+            parse_catalog_identity("qoder:__qoder_cn__:same-raw-session"),
+            SessionCatalogIdentity::Qoder {
+                session_id: "same-raw-session".to_string(),
+                provider_profile_id: Some("__qoder_cn__".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn qoder_catalog_metadata_keys_are_profile_qualified_with_global_compatibility() {
+        let mut global = catalog_entry(
+            "qoder:__qoder_global__:same-raw-session",
+            "child",
+            Some("Child"),
+            None,
+        );
+        global.engine = "qoder".to_string();
+        global.canonical_session_id = Some("same-raw-session".to_string());
+        global.provider_profile_id = Some("__qoder_global__".to_string());
+
+        let mut cn = global.clone();
+        cn.session_id = "qoder:__qoder_cn__:same-raw-session".to_string();
+        cn.provider_profile_id = Some("__qoder_cn__".to_string());
+
+        let global_key = build_catalog_entry_stable_key(&global);
+        let cn_key = build_catalog_entry_stable_key(&cn);
+        assert_eq!(global_key, "qoder:child:__qoder_global__:same-raw-session");
+        assert_eq!(cn_key, "qoder:child:__qoder_cn__:same-raw-session");
+        assert_ne!(global_key, cn_key);
+        assert_eq!(
+            metadata_stable_key_for_session_id(
+                "child",
+                "qoder:__qoder_cn__:same-raw-session",
+            ),
+            cn_key,
+        );
+        assert_eq!(
+            metadata_stable_key_for_session_id("child", &cn_key),
+            cn_key,
+        );
+        assert_eq!(
+            metadata_stable_key_for_session_id(
+                "child",
+                "qoder:__qoder_global__:__qoder_cn__:same-raw-session",
+            ),
+            "qoder:child:__qoder_global__:__qoder_cn__:same-raw-session",
+        );
+
+        let global_keys = catalog_metadata_lookup_keys_for_entry(&global);
+        let cn_keys = catalog_metadata_lookup_keys_for_entry(&cn);
+        assert!(global_keys.contains(&"qoder:child:same-raw-session".to_string()));
+        assert!(!cn_keys.contains(&"qoder:child:same-raw-session".to_string()));
+    }
+
+    #[test]
+    fn qoder_automatic_hide_aliases_do_not_cross_distributions() {
+        let global = "qoder:__qoder_global__:same-raw-session";
+        let cn = "qoder:__qoder_cn__:same-raw-session";
+
+        assert_eq!(expand_hidden_session_id_aliases(global), vec![global.to_string()]);
+        assert_eq!(expand_hidden_session_id_aliases(cn), vec![cn.to_string()]);
+        let legacy = expand_hidden_session_id_aliases("qoder:legacy-session");
+        assert!(legacy.contains(&"qoder:__qoder_global__:legacy-session".to_string()));
+        assert!(legacy.contains(&"qoder:legacy-session".to_string()));
+        assert!(legacy.contains(&"legacy-session".to_string()));
     }
 
     #[test]

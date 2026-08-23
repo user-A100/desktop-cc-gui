@@ -13,6 +13,7 @@ use super::store::{
     source_is_fresh, upsert_rows, BackfillState, SessionIndexRow,
 };
 use crate::engine::claude_history::encode_project_path;
+use crate::engine::qoder_provider_profile::canonical_qoder_native_session_id;
 
 /// Freshness window for source fingerprints. Within this, list can skip rescan.
 /// Kept short so CLI-created sessions appear in the sidebar without force refresh.
@@ -1680,7 +1681,21 @@ pub(crate) fn rows_from_qoder_summaries(
     let workspace_key = normalize_path_key(&workspace_path.to_string_lossy());
     sessions
         .iter()
-        .map(|session| {
+        .filter_map(|session| {
+            let session_id = match canonical_qoder_native_session_id(
+                &session.session_id,
+                session.provider_profile_id.as_deref(),
+            ) {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    log::warn!(
+                        "[session-index] ignored invalid Qoder session identity `{}`: {}",
+                        session.session_id,
+                        error
+                    );
+                    return None;
+                }
+            };
             let title = {
                 let trimmed = session.first_message.trim();
                 if trimmed.is_empty() {
@@ -1689,9 +1704,9 @@ pub(crate) fn rows_from_qoder_summaries(
                     truncate_title(trimmed, 80)
                 }
             };
-            SessionIndexRow {
+            Some(SessionIndexRow {
                 engine: "qoder".into(),
-                session_id: session.session_id.clone(),
+                session_id,
                 title,
                 native_title: None,
                 updated_at: session.updated_at,
@@ -1701,9 +1716,9 @@ pub(crate) fn rows_from_qoder_summaries(
                 physical_path: None,
                 parent_session_id: None,
                 size_bytes: session.file_size_bytes,
-                provider_profile_id: None,
-                provider_profile_name: None,
-            }
+                provider_profile_id: session.provider_profile_id.clone(),
+                provider_profile_name: session.provider_profile_name.clone(),
+            })
         })
         .collect()
 }
@@ -1924,22 +1939,51 @@ mod tests {
     fn rows_from_qoder_summaries_prefix_engine_and_title() {
         let rows = rows_from_qoder_summaries(
             Path::new("/Users/zhukunpeng/Desktop/CC GUI 项目/desktop-cc-gui"),
-            &[crate::engine::qoder_history::QoderSessionSummary {
-                session_id: "019ffb7b-dedc-7b36-8d2f-f85f35501036".into(),
-                first_message: "我是 Qoder".into(),
-                updated_at: 1_786_896_696_172,
-                created_at: 1_786_896_696_172,
-                message_count: 2,
-                file_size_bytes: None,
-                engine: Some("qoder".into()),
-                canonical_session_id: Some("019ffb7b-dedc-7b36-8d2f-f85f35501036".into()),
-                attribution_status: None,
-            }],
+            &[
+                crate::engine::qoder_history::QoderSessionSummary {
+                    session_id: "019ffb7b-dedc-7b36-8d2f-f85f35501036".into(),
+                    first_message: "我是 Qoder Global".into(),
+                    updated_at: 1_786_896_696_172,
+                    created_at: 1_786_896_696_172,
+                    message_count: 2,
+                    file_size_bytes: None,
+                    engine: Some("qoder".into()),
+                    canonical_session_id: Some("019ffb7b-dedc-7b36-8d2f-f85f35501036".into()),
+                    attribution_status: None,
+                    provider_profile_id: Some("__qoder_global__".into()),
+                    provider_profile_name: Some("Qoder Global".into()),
+                },
+                crate::engine::qoder_history::QoderSessionSummary {
+                    session_id: "019ffb7b-dedc-7b36-8d2f-f85f35501036".into(),
+                    first_message: "我是 Qoder CN".into(),
+                    updated_at: 1_786_896_696_173,
+                    created_at: 1_786_896_696_173,
+                    message_count: 2,
+                    file_size_bytes: None,
+                    engine: Some("qoder".into()),
+                    canonical_session_id: Some("019ffb7b-dedc-7b36-8d2f-f85f35501036".into()),
+                    attribution_status: None,
+                    provider_profile_id: Some("__qoder_cn__".into()),
+                    provider_profile_name: Some("Qoder CN".into()),
+                },
+            ],
         );
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].engine, "qoder");
-        assert_eq!(rows[0].session_id, "019ffb7b-dedc-7b36-8d2f-f85f35501036");
-        assert_eq!(rows[0].title, "我是 Qoder");
+        assert_eq!(
+            rows[0].session_id,
+            "qoder:__qoder_global__:019ffb7b-dedc-7b36-8d2f-f85f35501036"
+        );
+        assert_eq!(rows[0].title, "我是 Qoder Global");
+        assert_eq!(
+            rows[0].provider_profile_id.as_deref(),
+            Some("__qoder_global__")
+        );
+        assert_eq!(
+            rows[1].session_id,
+            "qoder:__qoder_cn__:019ffb7b-dedc-7b36-8d2f-f85f35501036"
+        );
+        assert_eq!(rows[1].provider_profile_id.as_deref(), Some("__qoder_cn__"));
         assert!(rows[0]
             .workspace_path
             .as_deref()

@@ -25,8 +25,11 @@ import {
   OPENCODE_LOCAL_PROVIDER_PROFILE_NAME,
   PI_LOCAL_PROVIDER_PROFILE_ID,
   PI_LOCAL_PROVIDER_PROFILE_NAME,
+  QODER_CN_PROVIDER_PROFILE_ID,
+  QODER_CN_PROVIDER_PROFILE_NAME,
+  QODER_GLOBAL_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_NAME,
   QODER_LOCAL_PROVIDER_PROFILE_ID,
-  QODER_LOCAL_PROVIDER_PROFILE_NAME,
   type EngineProviderProfileOption,
 } from "../../../../threads/constants/codexProviderProfiles";
 import type { ModelInfo, ProviderId } from "../types";
@@ -126,9 +129,14 @@ const DEFAULT_PROFILES: ProfileCatalog = {
   ],
   qoder: [
     {
-      id: QODER_LOCAL_PROVIDER_PROFILE_ID,
-      name: QODER_LOCAL_PROVIDER_PROFILE_NAME,
-      source: "disk",
+      id: QODER_GLOBAL_PROVIDER_PROFILE_ID,
+      name: QODER_GLOBAL_PROVIDER_PROFILE_NAME,
+      source: "managed",
+    },
+    {
+      id: QODER_CN_PROVIDER_PROFILE_ID,
+      name: QODER_CN_PROVIDER_PROFILE_NAME,
+      source: "managed",
     },
   ],
 };
@@ -248,7 +256,8 @@ async function loadProfileCatalog(): Promise<ProfileCatalog> {
               : DEFAULT_PROFILES.opencode,
           // PI has no multi-provider store; always surface native ~/.pi profile.
           pi: DEFAULT_PROFILES.pi,
-          // Qoder 账号体系无 API-key provider 面；始终用本地 profile（--config-dir 默认）。
+          // Qoder is one engine with two fixed distributions. These bindings
+          // are intentionally static, not vendor CRUD profiles.
           qoder: DEFAULT_PROFILES.qoder,
         };
         return profileCatalogCache;
@@ -313,7 +322,10 @@ function initialLoadedModels(
 function toModelInfo(
   model: Awaited<ReturnType<typeof getEngineModels>>[number],
   engine?: EngineType,
+  requestedProviderProfileId?: string,
 ): ModelInfo {
+  const qoderProfileId =
+    engine === "qoder" ? requestedProviderProfileId?.trim() || undefined : undefined;
   const base: ModelInfo = {
     id: model.id,
     model: model.model,
@@ -321,7 +333,10 @@ function toModelInfo(
     description: model.description,
     source: model.source,
     provider: model.provider?.trim() || undefined,
-    providerProfileId: model.providerProfileId ?? undefined,
+    // ACP live Qoder catalogs do not universally echo a profile id. The
+    // request binding is authoritative, so stamp it before profile filtering
+    // rather than treating a Global/CN row as a public fallback model.
+    providerProfileId: model.providerProfileId ?? qoderProfileId,
   };
   return enrichModelInfoWithAtomicReasoning(engine ?? null, base);
 }
@@ -556,7 +571,9 @@ function useProviderTargetCatalogOwner({
               ? { forceRefresh: true }
               : {}),
           })
-            .then((models) => models.map((entry) => toModelInfo(entry, engine)))
+            .then((models) =>
+              models.map((entry) => toModelInfo(entry, engine, providerProfileId)),
+            )
             .finally(() => {
               modelCatalogRequests.delete(requestKey);
             });
@@ -635,7 +652,7 @@ function useProviderTargetCatalogOwner({
           const models = (await getEngineModels(engine, {
             providerProfileId,
             forceRefresh: true,
-          })).map((entry) => toModelInfo(entry, engine));
+          })).map((entry) => toModelInfo(entry, engine, providerProfileId));
           modelCatalogCache.set(key, models);
           if (
             mode === "shared" &&
@@ -764,8 +781,8 @@ function useProviderTargetCatalogOwner({
         ],
       });
     }
-    // Qoder 已进 PROVIDER_PROFILE_ENGINES（enable-qoder-shared-target）：shared 与
-    // create-session 两种模式都走通用分组，local-only profile 来自 DEFAULT_PROFILES。
+    // Qoder 已进 PROVIDER_PROFILE_ENGINES：shared 与 create-session 都走通用分组，
+    // 但 Global/CN 是固定 distribution binding，不是用户可编辑的 provider CRUD 项。
     return groups;
   }, [
     currentProvider,

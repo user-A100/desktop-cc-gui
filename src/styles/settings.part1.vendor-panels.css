@@ -442,6 +442,56 @@
   border-radius: 6px;
 }
 
+/* Qoder is one engine with two isolated distributions. These tabs only choose
+ * the visible configuration panel; they never alter the thread/runtime binding. */
+.vendor-qoder-distribution-tabs {
+  align-self: flex-start;
+}
+
+.vendor-qoder-distribution-tab {
+  min-width: 108px;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
+}
+
+.vendor-qoder-distribution-panel {
+  animation: vendor-qoder-distribution-panel-enter 160ms ease-out both;
+}
+
+@keyframes vendor-qoder-distribution-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vendor-qoder-distribution-tab {
+    transition: none;
+  }
+
+  .vendor-qoder-distribution-panel {
+    animation: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .vendor-qoder-distribution-tabs {
+    align-self: stretch;
+  }
+
+  .vendor-qoder-distribution-tab {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
 /*
  * Engine settings / provider channels section stack.
  * Parent dense gap is 14px; each section adds margin-top 14px so the break

@@ -144,8 +144,16 @@ impl AppState {
                 EngineType::Qoder,
                 EngineConfig {
                     bin_path: settings.qoder_bin.clone(),
+                    home_dir: settings.qoder_config_dir.clone(),
                     ..Default::default()
                 },
+            )
+            .await;
+        self.engine_manager
+            .set_qoder_distribution_settings(
+                crate::engine::qoder_provider_profile::QoderDistributionSettings::from_app_settings(
+                    &settings,
+                ),
             )
             .await;
 

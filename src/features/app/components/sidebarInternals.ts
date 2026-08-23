@@ -103,7 +103,9 @@ export function isPendingEngineThreadId(threadId: string): boolean {
     normalizedThreadId.startsWith("kimi-pending-") ||
     normalizedThreadId.startsWith("grok-pending-") ||
     normalizedThreadId.startsWith("opencode-pending-") ||
-    normalizedThreadId.startsWith("dsh-pending-")
+    normalizedThreadId.startsWith("dsh-pending-") ||
+    normalizedThreadId.startsWith("pi-pending-") ||
+    normalizedThreadId.startsWith("qoder-pending-")
   );
 }
 

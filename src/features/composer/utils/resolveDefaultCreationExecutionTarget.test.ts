@@ -6,6 +6,10 @@ import {
   GROK_LOCAL_PROVIDER_PROFILE_ID,
   LOCAL_PROVIDER_PROFILE_DISPLAY_NAME,
   PI_LOCAL_PROVIDER_PROFILE_ID,
+  QODER_CN_PROVIDER_PROFILE_ID,
+  QODER_CN_PROVIDER_PROFILE_NAME,
+  QODER_GLOBAL_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_NAME,
   QODER_LOCAL_PROVIDER_PROFILE_ID,
 } from "../../threads/constants/codexProviderProfiles";
 import {
@@ -190,15 +194,33 @@ describe("resolveDefaultCreationExecutionTarget", () => {
 
     expect(target).toEqual({
       engine: "qoder",
-      providerProfileId: null,
+      providerProfileId: QODER_GLOBAL_PROVIDER_PROFILE_ID,
       modelCatalogEntryId: "minimax/minimax-m3-cp",
       model: "minimax/minimax-m3-cp",
       reasoning: null,
-      providerProfileNameSnapshot: LOCAL_PROVIDER_PROFILE_DISPLAY_NAME,
-      providerProfileSource: "disk",
+      providerProfileNameSnapshot: QODER_GLOBAL_PROVIDER_PROFILE_NAME,
+      providerProfileSource: "managed",
     });
     // Qoder 已进 Shared 集合（enable-qoder-shared-target）：Shared 契约与创建契约都放行。
     expect(isResolvedExecutionTarget(target)).toBe(true);
+    expect(isResolvedCreationExecutionTarget(target)).toBe(true);
+  });
+
+  it("preserves the explicit Qoder CN distribution binding", () => {
+    const target = resolveDefaultCreationExecutionTarget({
+      enabled: true,
+      selectedEngine: "qoder",
+      selectedModelId: "qoder-cn-model",
+      providerProfileId: QODER_CN_PROVIDER_PROFILE_ID,
+      models: [{ id: "qoder-cn-model", isDefault: true }],
+    });
+
+    expect(target).toMatchObject({
+      engine: "qoder",
+      providerProfileId: QODER_CN_PROVIDER_PROFILE_ID,
+      providerProfileNameSnapshot: QODER_CN_PROVIDER_PROFILE_NAME,
+      providerProfileSource: "managed",
+    });
     expect(isResolvedCreationExecutionTarget(target)).toBe(true);
   });
 

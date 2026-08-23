@@ -182,7 +182,10 @@ export function writeClientCreatedSessionIndex(input: {
   if (!engine || engine === "shared" || !rawId || !workspacePath) {
     return;
   }
-  const sessionId = bareSessionId(rawId);
+  // Qoder canonical id embeds its distribution. Keep it intact so Rust can
+  // validate/canonicalize with providerProfileId before the composite index key
+  // is written; stripping to raw would collapse Global/CN collisions.
+  const sessionId = engine === "qoder" ? rawId : bareSessionId(rawId);
   if (!sessionId || isLocalPendingDraftSessionId(sessionId)) {
     return;
   }

@@ -321,7 +321,6 @@ const workspace = {
   },
   sharedSession: {
     dshUnsupported: "Shared Session 暂不支持 DSH",
-    qoderUnsupported: "Shared Session 暂不支持 Qoder CLI",
   },
 };
 

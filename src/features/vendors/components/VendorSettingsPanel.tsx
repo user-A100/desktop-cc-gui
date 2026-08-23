@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
@@ -50,6 +58,7 @@ import { GrokProviderDialog } from "./GrokProviderDialog";
 import { OpenCodeProviderDialog } from "./OpenCodeProviderDialog";
 import { PiProviderAuthSection } from "./PiProviderAuthSection";
 import { QoderAuthSection } from "./QoderAuthSection";
+import { QoderDoctorSection } from "./QoderDoctorSection";
 import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import { CustomModelDialog } from "./CustomModelDialog";
 import {
@@ -108,6 +117,10 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { SettingsRowHelp } from "./SettingsRowHelp";
+import {
+  QODER_CN_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_ID,
+} from "../../threads/constants/codexProviderProfiles";
 
 const CODEX_PLUGIN_MODELS_MIGRATION_MARKER =
   "codemoss-codex-plugin-models-migrated-v1";
@@ -122,6 +135,8 @@ type VendorSettingsPanelProps = {
   codexReloadMessage: string | null;
   handleReloadCodexRuntimeConfig: () => Promise<void>;
   onUpdateAppSettings: (next: AppSettings) => Promise<void>;
+  initialCli?: "qoder";
+  initialQoderDistribution?: "global" | "cn";
 };
 
 /** Managed third-party rows only — local/official slots are not counted. */
@@ -268,9 +283,13 @@ export function VendorSettingsPanel({
   codexReloadMessage,
   handleReloadCodexRuntimeConfig,
   onUpdateAppSettings,
+  initialCli,
+  initialQoderDistribution,
 }: VendorSettingsPanelProps) {
   const { t } = useTranslation();
-  const [activeCli, setActiveCli] = useState<CliEngineId>("claude");
+  const [activeCli, setActiveCli] = useState<CliEngineId>(
+    () => initialCli ?? "claude",
+  );
   /** Narrow layout: list-only vs detail-only master–detail (ignored above 900px). */
   const [mobilePane, setMobilePane] = useState<"list" | "detail">("list");
   const [cliSearchQuery, setCliSearchQuery] = useState("");
@@ -313,6 +332,23 @@ export function VendorSettingsPanel({
   const [unifiedExecActionNotice, setUnifiedExecActionNotice] =
     useState<InlineNoticeState>(null);
   const didSeedCodexPluginModelsRef = useRef(false);
+  const [activeQoderDistribution, setActiveQoderDistribution] = useState<
+    "global" | "cn"
+  >(() => initialQoderDistribution ?? "global");
+
+  useEffect(() => {
+    if (initialCli) {
+      setActiveCli(initialCli);
+      setMobilePane("detail");
+    }
+  }, [initialCli]);
+
+  useEffect(() => {
+    if (!initialQoderDistribution) {
+      return;
+    }
+    setActiveQoderDistribution(initialQoderDistribution);
+  }, [initialQoderDistribution]);
 
   const claude = useProviderManagement();
   const codex = useCodexProviderManagement();
@@ -457,6 +493,8 @@ export function VendorSettingsPanel({
         return { path: appSettings.dshBin ?? null, args: null };
       case "qoder":
         return { path: appSettings.qoderBin ?? null, args: null };
+      case "qoder-cn":
+        return { path: appSettings.qoderCnBin ?? null, args: null };
       case "codex":
         return {
           path: appSettings.codexBin ?? null,
@@ -510,6 +548,12 @@ export function VendorSettingsPanel({
             qoderBin: payload.path,
           });
           break;
+        case "qoder-cn":
+          await onUpdateAppSettings({
+            ...appSettings,
+            qoderCnBin: payload.path,
+          });
+          break;
         case "codex":
           await onUpdateAppSettings({
             ...appSettings,
@@ -554,6 +598,98 @@ export function VendorSettingsPanel({
         }
         onConfigure={() => setCustomPathDialogEngine(engine)}
       />
+    );
+  };
+
+  const renderQoderDistributionCard = (
+    distribution: "global" | "cn",
+  ) => {
+    const isGlobal = distribution === "global";
+    const name = isGlobal ? "Qoder Global" : "Qoder CN";
+    const command = isGlobal ? "qodercli" : "qoderclicn";
+    const profileId = isGlobal
+      ? QODER_GLOBAL_PROVIDER_PROFILE_ID
+      : QODER_CN_PROVIDER_PROFILE_ID;
+    const configEnv = isGlobal ? "QODER_CONFIG_DIR" : "QODERCN_CONFIG_DIR";
+    const configuredDirectory = isGlobal
+      ? appSettings.qoderConfigDir
+      : appSettings.qoderCnConfigDir;
+    const binary = isGlobal ? appSettings.qoderBin : appSettings.qoderCnBin;
+    const pathEngine: CliCustomPathEngine = isGlobal ? "qoder" : "qoder-cn";
+    const handleConfigDirectorySubmit = async (
+      event: FormEvent<HTMLFormElement>,
+    ) => {
+      event.preventDefault();
+      const value = new FormData(event.currentTarget)
+        .get("config-dir")
+        ?.toString()
+        .trim() || null;
+      try {
+        await onUpdateAppSettings(
+          isGlobal
+            ? { ...appSettings, qoderConfigDir: value }
+            : { ...appSettings, qoderCnConfigDir: value },
+        );
+      } catch (error) {
+        pushErrorToast({
+          title: t("common.error"),
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+
+    return (
+      <div
+        className="vendor-group-card"
+        key={`${distribution}-${configuredDirectory ?? "default"}`}
+        data-qoder-distribution-card={distribution}
+        data-settings-deep-link={
+          initialQoderDistribution === distribution ? "true" : undefined
+        }
+      >
+        <div className="vendor-group-row">
+          <div className="vendor-group-row-copy">
+            <span className="vendor-group-row-title">{name}</span>
+            <span className="settings-help">
+              {command} · 独立账号、PAT、config directory 与模型目录
+            </span>
+          </div>
+        </div>
+        {renderCustomPathEntry(pathEngine)}
+        <form className="vendor-group-row" onSubmit={handleConfigDirectorySubmit}>
+          <div className="vendor-group-row-copy">
+            <label className="vendor-group-row-title" htmlFor={`qoder-${distribution}-config-dir`}>
+              Config directory
+            </label>
+            <span className="settings-help">
+              留空使用 {configEnv} / 默认目录。
+            </span>
+          </div>
+          <div className="settings-field-row">
+            <input
+              id={`qoder-${distribution}-config-dir`}
+              name="config-dir"
+              className="settings-input"
+              defaultValue={configuredDirectory ?? ""}
+              placeholder={isGlobal ? "~/.qoder" : "~/.qoder-cn"}
+            />
+            <button type="submit" className="vendor-btn-cancel">
+              {t("settings.save", { defaultValue: "保存" })}
+            </button>
+          </div>
+        </form>
+        <QoderAuthSection
+          qoderBin={binary}
+          configDir={configuredDirectory}
+          providerProfileId={profileId}
+          cliName={command}
+        />
+        <QoderDoctorSection
+          qoderBin={binary}
+          providerProfileId={profileId}
+          cliName={command}
+        />
+      </div>
     );
   };
 
@@ -978,12 +1114,20 @@ export function VendorSettingsPanel({
         openCodeHasConfig,
         piHasConfig: Boolean(appSettings.piBin?.trim()),
         dshHasConfig: Boolean(appSettings.dshBin?.trim()),
-        qoderHasConfig: Boolean(appSettings.qoderBin?.trim()),
+        qoderHasConfig: Boolean(
+          appSettings.qoderBin?.trim() ||
+            appSettings.qoderCnBin?.trim() ||
+            appSettings.qoderConfigDir?.trim() ||
+            appSettings.qoderCnConfigDir?.trim(),
+        ),
       }),
     [
       appSettings.piBin,
       appSettings.dshBin,
       appSettings.qoderBin,
+      appSettings.qoderCnBin,
+      appSettings.qoderConfigDir,
+      appSettings.qoderCnConfigDir,
       claudeHasConfig,
       codexGlobalConfigExists,
       kimiHasConfig,
@@ -1713,7 +1857,7 @@ export function VendorSettingsPanel({
               title="Qoder CLI"
               description={t("settings.qoderDescription", {
                 defaultValue:
-                  "Install and configure the Qoder CLI used by ccgui. Sign in with qodercli login; models come from the live ACP catalog.",
+                  "One Qoder engine with isolated Global and CN distributions. Each distribution owns its CLI, account, PAT and live ACP model catalog.",
               })}
               helpLabel={t("settings.vendor.openCliDocs", {
                 defaultValue: "Official docs",
@@ -1727,22 +1871,51 @@ export function VendorSettingsPanel({
                 defaultValue: "Engine settings",
               })}
             >
-              <div className="vendor-group-card">
+              <>
                 <div className="settings-help" style={{ padding: "8px 12px" }}>
                   {t("settings.qoderCliLifecycleHint", {
                     defaultValue:
-                      "Install or update the local Qoder CLI. Use Login below to run qodercli login, or set a PAT in the client.",
+                      "Global uses qodercli; CN uses qoderclicn. Do not share config directories or PAT between them.",
                   })}
                 </div>
-                {renderCustomPathEntry("qoder")}
-              </div>
-            </VendorSettingsSection>
-            <VendorSettingsSection
-              label={t("settings.vendor.qoderAuth.sectionTitle", {
-                defaultValue: "认证",
-              })}
-            >
-              <QoderAuthSection qoderBin={appSettings.qoderBin ?? null} />
+                <div
+                  className="settings-segmented vendor-qoder-distribution-tabs"
+                  role="tablist"
+                  aria-label="Qoder distribution"
+                >
+                  {(["global", "cn"] as const).map((distribution) => {
+                    const isActive = activeQoderDistribution === distribution;
+                    const label =
+                      distribution === "global" ? "Qoder Global" : "Qoder CN";
+                    return (
+                      <button
+                        key={distribution}
+                        id={`qoder-${distribution}-tab`}
+                        type="button"
+                        role="tab"
+                        aria-controls={`qoder-${distribution}-panel`}
+                        aria-selected={isActive}
+                        className={cn(
+                          "settings-segmented-btn vendor-qoder-distribution-tab",
+                          isActive && "active",
+                        )}
+                        onClick={() => setActiveQoderDistribution(distribution)}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div
+                  key={activeQoderDistribution}
+                  id={`qoder-${activeQoderDistribution}-panel`}
+                  role="tabpanel"
+                  aria-labelledby={`qoder-${activeQoderDistribution}-tab`}
+                  className="vendor-qoder-distribution-panel"
+                >
+                  {renderQoderDistributionCard(activeQoderDistribution)}
+                </div>
+              </>
             </VendorSettingsSection>
           </div>
           </CliLifecycleProvider>

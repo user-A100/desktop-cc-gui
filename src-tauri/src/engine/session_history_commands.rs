@@ -493,6 +493,7 @@ pub async fn delete_pi_session(
 pub async fn list_qoder_sessions(
     workspace_path: String,
     limit: Option<usize>,
+    provider_profile_id: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<Value, String> {
@@ -502,19 +503,25 @@ pub async fn list_qoder_sessions(
             &*state,
             app,
             "list_qoder_sessions",
-            json!({ "workspacePath": workspace_path, "limit": limit }),
+            json!({
+                "workspacePath": workspace_path,
+                "limit": limit,
+                "providerProfileId": provider_profile_id,
+            }),
         )
         .await;
     }
     let path = std::path::PathBuf::from(&workspace_path);
-    let config = state
-        .engine_manager
-        .get_engine_config(EngineType::Qoder)
-        .await;
-    let sessions = super::qoder_history::list_qoder_sessions(
+    let settings = state.app_settings.lock().await.clone();
+    let launch_profile = super::qoder_provider_profile::resolve_qoder_provider_launch_profile(
+        &workspace_path,
+        provider_profile_id.as_deref(),
+        &super::qoder_provider_profile::QoderDistributionSettings::from_app_settings(&settings),
+    )?;
+    let sessions = super::qoder_history::list_qoder_sessions_for_launch_profile(
         &path,
         limit,
-        config.as_ref().and_then(|item| item.home_dir.as_deref()),
+        &launch_profile,
     )
     .await?;
     serde_json::to_value(sessions).map_err(|error| error.to_string())
@@ -524,6 +531,7 @@ pub async fn list_qoder_sessions(
 pub async fn load_qoder_session(
     workspace_path: String,
     session_id: String,
+    provider_profile_id: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<Value, String> {
@@ -533,19 +541,25 @@ pub async fn load_qoder_session(
             &*state,
             app,
             "load_qoder_session",
-            json!({ "workspacePath": workspace_path, "sessionId": session_id }),
+            json!({
+                "workspacePath": workspace_path,
+                "sessionId": session_id,
+                "providerProfileId": provider_profile_id,
+            }),
         )
         .await;
     }
     let path = std::path::PathBuf::from(&workspace_path);
-    let config = state
-        .engine_manager
-        .get_engine_config(EngineType::Qoder)
-        .await;
-    let result = super::qoder_history::load_qoder_session(
+    let settings = state.app_settings.lock().await.clone();
+    let launch_profile = super::qoder_provider_profile::resolve_qoder_provider_launch_profile(
+        &workspace_path,
+        provider_profile_id.as_deref(),
+        &super::qoder_provider_profile::QoderDistributionSettings::from_app_settings(&settings),
+    )?;
+    let result = super::qoder_history::load_qoder_session_for_launch_profile(
         &path,
         &session_id,
-        config.as_ref().and_then(|item| item.home_dir.as_deref()),
+        &launch_profile,
     )
     .await?;
     serde_json::to_value(result).map_err(|error| error.to_string())
@@ -555,6 +569,7 @@ pub async fn load_qoder_session(
 pub async fn delete_qoder_session(
     workspace_path: String,
     session_id: String,
+    provider_profile_id: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
@@ -562,14 +577,16 @@ pub async fn delete_qoder_session(
         return Err("delete_qoder_session is unavailable through the remote backend".to_string());
     }
     let path = std::path::PathBuf::from(&workspace_path);
-    let config = state
-        .engine_manager
-        .get_engine_config(EngineType::Qoder)
-        .await;
-    super::qoder_history::delete_qoder_session(
+    let settings = state.app_settings.lock().await.clone();
+    let launch_profile = super::qoder_provider_profile::resolve_qoder_provider_launch_profile(
+        &workspace_path,
+        provider_profile_id.as_deref(),
+        &super::qoder_provider_profile::QoderDistributionSettings::from_app_settings(&settings),
+    )?;
+    super::qoder_history::delete_qoder_session_for_launch_profile(
         &path,
         &session_id,
-        config.as_ref().and_then(|item| item.home_dir.as_deref()),
+        &launch_profile,
     )
     .await
 }

@@ -9,20 +9,28 @@ import { invoke } from "@tauri-apps/api/core";
 export type QoderAuthState = "configured" | "env" | "none";
 
 export interface QoderAuthStatus {
+  distribution: "global" | "cn";
   authFile: { path: string; exists: boolean };
   state: QoderAuthState;
   maskedKey?: string;
   envVar: string;
 }
 
-export async function qoderAuthStatus(): Promise<QoderAuthStatus> {
-  return invoke<QoderAuthStatus>("qoder_auth_status");
+export async function qoderAuthStatus(
+  providerProfileId?: string | null,
+): Promise<QoderAuthStatus> {
+  return invoke<QoderAuthStatus>("qoder_auth_status", { providerProfileId });
 }
 
-export async function qoderAuthSetPat(key: string): Promise<void> {
-  return invoke<void>("qoder_auth_set_pat", { key });
+export async function qoderAuthSetPat(
+  key: string,
+  providerProfileId?: string | null,
+): Promise<void> {
+  return invoke<void>("qoder_auth_set_pat", { key, providerProfileId });
 }
 
-export async function qoderAuthDeletePat(): Promise<void> {
-  return invoke<void>("qoder_auth_delete_pat");
+export async function qoderAuthDeletePat(
+  providerProfileId?: string | null,
+): Promise<void> {
+  return invoke<void>("qoder_auth_delete_pat", { providerProfileId });
 }

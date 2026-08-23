@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -14,6 +14,7 @@ use crate::app_paths;
 use crate::codex;
 use crate::engine::{self, EngineType};
 use crate::shared::codex_core;
+use crate::shared_binding_visibility::collect_v2_shared_binding_ids_by_session;
 use crate::shared_event_log::{SessionTargetUpdate, SharedEventWriter};
 use crate::state::AppState;
 
@@ -477,6 +478,34 @@ fn validate_shared_native_thread_id(value: &str) -> Result<String, String> {
     }
 }
 
+fn canonical_shared_native_thread_id(
+    engine: EngineType,
+    provider_profile_id: Option<&str>,
+    native_thread_id: &str,
+) -> String {
+    let native_thread_id = native_thread_id.trim();
+    if native_thread_id.is_empty()
+        || engine != EngineType::Qoder
+        || is_pending_shared_binding_thread_id(engine, native_thread_id)
+    {
+        return native_thread_id.to_string();
+    }
+    match crate::engine::qoder_provider_profile::canonical_qoder_native_session_id(
+        native_thread_id,
+        provider_profile_id,
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            // 保留无法解释的旧值，避免 metadata sanitize 造成数据丢失；下游
+            // visibility 会拒绝把它展开为跨 distribution 的 bare raw alias。
+            log::warn!(
+                "[shared_sessions] retained malformed Qoder native binding `{native_thread_id}`: {error}"
+            );
+            native_thread_id.to_string()
+        }
+    }
+}
+
 pub(crate) fn is_pending_shared_binding_thread_id(engine: EngineType, thread_id: &str) -> bool {
     let normalized = thread_id.trim();
     if normalized.is_empty() {
@@ -541,7 +570,8 @@ pub(crate) fn engine_binding_thread_id(engine: EngineType, seed: &str) -> String
         EngineType::OpenCode => format!("opencode-pending-shared-{seed}"),
         EngineType::Gemini => format!("gemini-pending-shared-{seed}"),
         EngineType::Dsh => format!("dsh-pending-shared-{seed}"),
-        // Qoder is never a Shared target (fail-closed); the arm exists for exhaustiveness.
+        // Qoder Shared bindings retain their distribution identity; this id is only provisional
+        // until the corresponding native session is established.
         EngineType::Qoder => format!("qoder-pending-shared-{seed}"),
     }
 }
@@ -613,6 +643,11 @@ fn sanitize_shared_session_meta(meta: &mut SharedSessionMeta) {
         .retain(|engine, _| is_supported_shared_session_engine(*engine));
     for (engine, binding) in meta.bindings_by_engine.iter_mut() {
         binding.engine = *engine;
+        binding.native_thread_id = canonical_shared_native_thread_id(
+            *engine,
+            None,
+            &binding.native_thread_id,
+        );
     } // B.2 迁移：旧 `bindings_by_engine` 归位到 default-provider 语义。
       // V0 仍是 default binding 身份字段的权威来源（回滚兼容），
       // 因此 default key 的身份字段以 engine binding 为准做覆盖式同步；
@@ -620,6 +655,13 @@ fn sanitize_shared_session_meta(meta: &mut SharedSessionMeta) {
     meta.bindings_by_target.retain(|key, binding| {
         key == &binding.binding_key && is_supported_shared_session_engine(binding.engine)
     });
+    for binding in meta.bindings_by_target.values_mut() {
+        binding.native_thread_id = canonical_shared_native_thread_id(
+            binding.engine,
+            binding.provider_profile_id.as_deref(),
+            &binding.native_thread_id,
+        );
+    }
     for (engine, binding) in meta.bindings_by_engine.iter() {
         let key = shared_target_binding_key(*engine, None);
         match meta.bindings_by_target.get_mut(&key) {
@@ -990,14 +1032,24 @@ pub(crate) fn load_workspace_shared_ownership_seed(
             }
         };
         seed.session_ids.push(meta.id.clone());
-        for binding in meta.bindings_by_engine.values() {
-            let native_id = binding.native_thread_id.trim();
+        for (engine, binding) in &meta.bindings_by_engine {
+            let native_id = canonical_shared_native_thread_id(
+                *engine,
+                None,
+                &binding.native_thread_id,
+            );
+            let native_id = native_id.trim();
             if !native_id.is_empty() {
                 seed.native_ids.push(native_id.to_string());
             }
         }
         for binding in meta.bindings_by_target.values() {
-            let native_id = binding.native_thread_id.trim();
+            let native_id = canonical_shared_native_thread_id(
+                binding.engine,
+                binding.provider_profile_id.as_deref(),
+                &binding.native_thread_id,
+            );
+            let native_id = native_id.trim();
             if !native_id.is_empty() {
                 seed.native_ids.push(native_id.to_string());
             }
@@ -1062,12 +1114,13 @@ pub(crate) fn read_latest_shared_session_snapshot(
 pub(crate) fn list_workspace_shared_sessions(
     workspace_id: &str,
     event_writer: Option<&crate::shared_event_log::SharedEventWriter>,
+    event_log_path: Option<&Path>,
 ) -> Result<Vec<SharedSessionSummary>, String> {
     let directory = workspace_shared_sessions_dir(workspace_id)?;
     if !directory.exists() {
         return Ok(Vec::new());
     }
-    let mut summaries = Vec::new();
+    let mut session_metas = Vec::new();
     for entry in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let file_type = entry.file_type().map_err(|error| error.to_string())?;
@@ -1079,20 +1132,76 @@ pub(crate) fn list_workspace_shared_sessions(
             Ok(meta) => meta,
             Err(_) => continue,
         };
+        session_metas.push(meta);
+    }
+
+    let v2_native_thread_ids_by_session = if event_writer.is_none() {
+        let shared_session_ids = session_metas
+            .iter()
+            .map(|meta| meta.id.clone())
+            .collect::<Vec<_>>();
+        match event_log_path {
+            Some(path) => match collect_v2_shared_binding_ids_by_session(path, &shared_session_ids)
+            {
+                Ok(ids_by_session) => ids_by_session,
+                Err(error) => {
+                    log::warn!(
+                        "[shared_sessions.list_workspace_shared_sessions] read-only V2 binding recovery failed for workspace {}: {}",
+                        workspace_id,
+                        error
+                    );
+                    BTreeMap::new()
+                }
+            },
+            None => BTreeMap::new(),
+        }
+    } else {
+        BTreeMap::new()
+    };
+
+    let mut summaries = Vec::with_capacity(session_metas.len());
+    for meta in session_metas {
         let mut native_thread_ids = meta
             .bindings_by_engine
-            .values()
-            .map(|binding| binding.native_thread_id.clone())
+            .iter()
+            .map(|(engine, binding)| {
+                canonical_shared_native_thread_id(*engine, None, &binding.native_thread_id)
+            })
             .collect::<Vec<_>>();
+        native_thread_ids.extend(
+            meta.bindings_by_target
+                .values()
+                .map(|binding| {
+                    canonical_shared_native_thread_id(
+                        binding.engine,
+                        binding.provider_profile_id.as_deref(),
+                        &binding.native_thread_id,
+                    )
+                }),
+        );
         if let Some(writer) = event_writer {
             native_thread_ids.extend(
                 writer
                     .binding_states_for_session(&meta.id)
                     .map_err(|error| error.to_string())?
                     .into_iter()
-                    .filter_map(|binding| binding.native_session_id)
+                    .filter_map(|binding| {
+                        binding.native_session_id.map(|native_session_id| {
+                            if binding.engine == EngineType::Qoder.icon() {
+                                canonical_shared_native_thread_id(
+                                    EngineType::Qoder,
+                                    binding.provider_profile_id.as_deref(),
+                                    &native_session_id,
+                                )
+                            } else {
+                                native_session_id
+                            }
+                        })
+                    })
                     .filter(|native_session_id| !native_session_id.trim().is_empty()),
             );
+        } else if let Some(v2_native_thread_ids) = v2_native_thread_ids_by_session.get(&meta.id) {
+            native_thread_ids.extend(v2_native_thread_ids.iter().cloned());
         }
         native_thread_ids.sort();
         native_thread_ids.dedup();
@@ -1384,9 +1493,14 @@ pub async fn list_shared_sessions(
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
     ensure_known_workspace(&state.workspaces, &workspace_id).await?;
+    let event_log_path = state
+        .storage_path
+        .parent()
+        .map(|parent| parent.join("shared-event-log-v2.sqlite3"));
     Ok(json!(list_workspace_shared_sessions(
         &workspace_id,
         state.shared_event_writer.as_ref(),
+        event_log_path.as_deref(),
     )?))
 }
 
@@ -1492,7 +1606,18 @@ pub async fn update_shared_session_native_binding(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let shared_session_id = parse_shared_session_id(&thread_id)?;
-    let new_native_thread_id = validate_shared_native_thread_id(&new_native_thread_id)?;
+    let new_native_thread_id = canonical_shared_native_thread_id(
+        engine,
+        provider_profile_id.as_deref(),
+        &validate_shared_native_thread_id(&new_native_thread_id)?,
+    );
+    let old_native_thread_id = old_native_thread_id.map(|native_thread_id| {
+        canonical_shared_native_thread_id(
+            engine,
+            provider_profile_id.as_deref(),
+            &native_thread_id,
+        )
+    });
     let mut meta = read_shared_session_meta(&workspace_id, &shared_session_id)?;
     if let Some(provider) = provider_profile_id.as_deref() {
         // B.5：managed provider 走 Target 级 binding；rebind 时保留 created_at，
@@ -2248,6 +2373,20 @@ mod tests {
             shared_target_binding_key(EngineType::Codex, Some("openai")),
             "codex:openai"
         );
+        assert_eq!(
+            shared_target_binding_key(
+                EngineType::Qoder,
+                Some(crate::engine::qoder_provider_profile::QODER_GLOBAL_PROVIDER_PROFILE_ID),
+            ),
+            "qoder:__qoder_global__"
+        );
+        assert_eq!(
+            shared_target_binding_key(
+                EngineType::Qoder,
+                Some(crate::engine::qoder_provider_profile::QODER_CN_PROVIDER_PROFILE_ID),
+            ),
+            "qoder:__qoder_cn__"
+        );
     }
 
     #[test]
@@ -2518,6 +2657,39 @@ mod tests {
         assert_eq!(target.native_thread_id, "claude:session-new");
         assert_eq!(target.last_synced_turn_seq, 3);
         assert_eq!(target.availability, "recovery-required");
+    }
+
+    #[test]
+    fn sanitize_qualifies_qoder_bindings_by_distribution() {
+        let mut meta = meta_with_engine_binding(EngineType::Qoder, "same-qoder-session");
+        meta.bindings_by_target.insert(
+            "qoder:__qoder_cn__".to_string(),
+            SharedTargetBindingMeta {
+                binding_key: "qoder:__qoder_cn__".to_string(),
+                engine: EngineType::Qoder,
+                provider_profile_id: Some("__qoder_cn__".to_string()),
+                native_thread_id: "same-qoder-session".to_string(),
+                created_at: 1,
+                last_used_at: 2,
+                last_synced_turn_seq: 3,
+                availability: "ready".to_string(),
+            },
+        );
+
+        sanitize_shared_session_meta(&mut meta);
+
+        assert_eq!(
+            meta.bindings_by_engine[&EngineType::Qoder].native_thread_id,
+            "qoder:__qoder_global__:same-qoder-session"
+        );
+        assert_eq!(
+            meta.bindings_by_target["qoder:default"].native_thread_id,
+            "qoder:__qoder_global__:same-qoder-session"
+        );
+        assert_eq!(
+            meta.bindings_by_target["qoder:__qoder_cn__"].native_thread_id,
+            "qoder:__qoder_cn__:same-qoder-session"
+        );
     }
 
     #[test]

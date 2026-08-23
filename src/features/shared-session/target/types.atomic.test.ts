@@ -19,14 +19,14 @@ describe("isAtomicExecutionTarget", () => {
     expect(isResolvedExecutionTarget(target)).toBe(true);
   });
 
-  it("accepts Qoder local disk target as atomic and, after Shared extension, resolved", () => {
+  it("accepts Qoder Global target as atomic and, after Shared extension, resolved", () => {
     const target = {
       engine: "qoder" as const,
-      providerProfileId: null,
+      providerProfileId: "__qoder_global__",
       modelCatalogEntryId: "minimax/minimax-m3-cp",
       model: "minimax/minimax-m3-cp",
-      providerProfileNameSnapshot: "本地配置",
-      providerProfileSource: "disk" as const,
+      providerProfileNameSnapshot: "Qoder Global",
+      providerProfileSource: "managed" as const,
       reasoning: null,
     };
     expect(isAtomicExecutionTarget(target)).toBe(true);

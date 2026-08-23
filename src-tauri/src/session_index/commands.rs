@@ -24,13 +24,80 @@ use crate::engine::gemini_history::list_gemini_sessions;
 use crate::engine::grok_history::list_grok_sessions;
 use crate::engine::opencode_session_list_core;
 use crate::engine::pi_history::list_pi_sessions;
-use crate::engine::qoder_history::list_qoder_sessions;
+use crate::engine::qoder_history::{
+    list_qoder_sessions_for_launch_profile, QoderSessionSummary,
+};
+use crate::engine::qoder_provider_profile::{
+    resolve_qoder_provider_launch_profile, QoderDistributionSettings, QoderProviderLaunchProfile,
+    QODER_CN_PROVIDER_PROFILE_ID, QODER_GLOBAL_PROVIDER_PROFILE_ID,
+};
 use crate::local_usage::resolve_sessions_roots;
 use crate::state::AppState;
 
 const DEFAULT_SIDEBAR_INDEX_LIMIT: usize = 12;
 const ASYNC_ENGINE_LIST_TIMEOUT: Duration = Duration::from_secs(3);
 const OPENCODE_INDEX_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn resolve_qoder_index_profiles(
+    workspace_path: &PathBuf,
+    settings: &QoderDistributionSettings,
+) -> Result<[QoderProviderLaunchProfile; 2], String> {
+    let workspace_key = workspace_path.to_string_lossy();
+    Ok([
+        resolve_qoder_provider_launch_profile(
+            &workspace_key,
+            Some(QODER_GLOBAL_PROVIDER_PROFILE_ID),
+            settings,
+        )?,
+        resolve_qoder_provider_launch_profile(
+            &workspace_key,
+            Some(QODER_CN_PROVIDER_PROFILE_ID),
+            settings,
+        )?,
+    ])
+}
+
+async fn list_qoder_index_sessions(
+    workspace_path: &PathBuf,
+    limit: usize,
+    profiles: [QoderProviderLaunchProfile; 2],
+) -> (Vec<QoderSessionSummary>, Option<String>) {
+    let [global_profile, cn_profile] = profiles;
+    let (global_result, cn_result) = tokio::join!(
+        timeout(
+            ASYNC_ENGINE_LIST_TIMEOUT,
+            list_qoder_sessions_for_launch_profile(workspace_path, Some(limit), &global_profile),
+        ),
+        timeout(
+            ASYNC_ENGINE_LIST_TIMEOUT,
+            list_qoder_sessions_for_launch_profile(workspace_path, Some(limit), &cn_profile),
+        ),
+    );
+
+    let mut sessions = Vec::new();
+    let mut failure = None;
+    for result in [global_result, cn_result] {
+        match result {
+            Ok(Ok(mut distribution_sessions)) => sessions.append(&mut distribution_sessions),
+            Ok(Err(error)) => {
+                let message = error.to_ascii_lowercase();
+                failure = Some(if message.contains("not found")
+                    || message.contains("not installed")
+                    || message.contains("no such file")
+                    || message.contains("timed out")
+                    || message.contains("timeout")
+                {
+                    "qoder-unavailable".to_string()
+                } else {
+                    format!("qoder-sync-error:{}", truncate_error(&error))
+                });
+            }
+            Err(_) => failure = Some("qoder-sync-timeout".to_string()),
+        }
+    }
+    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    (sessions, failure)
+}
 
 fn merge_writer(into: &mut WriterResult, from: WriterResult) {
     into.upserted += from.upserted;
@@ -412,42 +479,20 @@ async fn sync_qoder_engine(
         .engine_manager
         .get_engine_config(crate::engine::EngineType::Qoder)
         .await;
-    // Mirror Session Management: skip ACP listing unless EngineManager has a
-    // Qoder config. Tests construct a bare EngineManager::new(); production
-    // seeds the config even when qoder_bin is unset, so listing still falls
-    // back to PATH qodercli. Empty list is a soft-empty success.
-    let list_result = if qoder_config.is_some() {
-        let qoder_home = qoder_config
-            .as_ref()
-            .and_then(|config| config.home_dir.as_deref());
-        timeout(
-            ASYNC_ENGINE_LIST_TIMEOUT,
-            list_qoder_sessions(&workspace_path, Some(limit), qoder_home),
-        )
-        .await
-    } else {
-        Ok(Ok(Vec::new()))
-    };
-
-    let (rows, partial) = match list_result {
-        Ok(Ok(sessions)) => (rows_from_qoder_summaries(&workspace_path, &sessions), None),
-        Ok(Err(error)) => {
-            let message = error.to_ascii_lowercase();
-            let soft = message.contains("not found")
-                || message.contains("not installed")
-                || message.contains("no such file")
-                || message.contains("timed out")
-                || message.contains("timeout");
-            (
+    let (rows, partial) = if qoder_config.is_some() {
+        let settings = state.engine_manager.qoder_distribution_settings().await;
+        match resolve_qoder_index_profiles(&workspace_path, &settings) {
+            Ok(profiles) => {
+                let (sessions, partial) = list_qoder_index_sessions(&workspace_path, limit, profiles).await;
+                (rows_from_qoder_summaries(&workspace_path, &sessions), partial)
+            }
+            Err(error) => (
                 Vec::new(),
-                if soft {
-                    Some("qoder-unavailable".into())
-                } else {
-                    Some(format!("qoder-sync-error:{}", truncate_error(&error)))
-                },
-            )
+                Some(format!("qoder-sync-error:{}", truncate_error(&error))),
+            ),
         }
-        Err(_) => (Vec::new(), Some("qoder-sync-timeout".into())),
+    } else {
+        (Vec::new(), None)
     };
 
     tokio::task::spawn_blocking(move || {
@@ -784,6 +829,15 @@ pub(crate) async fn backfill_session_index_core(
         .engine_manager
         .get_engine_config(crate::engine::EngineType::Qoder)
         .await;
+    let qoder_profiles = qoder_config
+        .is_some()
+        .then(|| {
+            resolve_qoder_index_profiles(
+                &workspace_path,
+                &QoderDistributionSettings::from_app_settings(&settings),
+            )
+        })
+        .transpose()?;
     let (gemini, grok, pi, dsh, qoder) = tokio::join!(
         backfill_async_engine(
             "gemini",
@@ -821,13 +875,32 @@ pub(crate) async fn backfill_session_index_core(
             "qoder",
             workspace_path.clone(),
             move |path, limit| {
-                let config = qoder_config.clone();
+                let profiles = qoder_profiles.clone();
                 async move {
-                    if config.is_none() {
+                    let Some([global_profile, cn_profile]) = profiles else {
                         return Ok(Vec::new());
+                    };
+                    let (global_result, cn_result) = tokio::join!(
+                        list_qoder_sessions_for_launch_profile(
+                            &path,
+                            Some(limit),
+                            &global_profile,
+                        ),
+                        list_qoder_sessions_for_launch_profile(&path, Some(limit), &cn_profile),
+                    );
+                    let mut sessions = Vec::new();
+                    let mut errors = Vec::new();
+                    for result in [global_result, cn_result] {
+                        match result {
+                            Ok(mut distribution_sessions) => sessions.append(&mut distribution_sessions),
+                            Err(error) => errors.push(error),
+                        }
                     }
-                    let home = config.as_ref().and_then(|item| item.home_dir.as_deref());
-                    list_qoder_sessions(&path, Some(limit), home).await
+                    if sessions.is_empty() && !errors.is_empty() {
+                        return Err(errors.join("; "));
+                    }
+                    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+                    Ok(sessions)
                 }
             },
             rows_from_qoder_summaries,

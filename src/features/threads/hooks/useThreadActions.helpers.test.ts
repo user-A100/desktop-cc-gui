@@ -17,7 +17,9 @@ import {
   mergeGeminiSessionSummaries,
   mergeGrokSessionSummaries,
   mergeKimiSessionSummaries,
+  mergeQoderSessionSummaries,
   normalizeGeminiSessionSummaries,
+  normalizeQoderSessionSummaries,
   mergeDshSessionSummaries,
   mergeThreadSummaryPreservingStableIdentity,
   resolveThreadSourceMeta,
@@ -33,6 +35,55 @@ import {
 } from "./useThreadActions.helpers";
 
 describe("useThreadActions.helpers", () => {
+  it("merges Qoder Global/CN catalog rows with the same raw id independently", () => {
+    const merged = mergeQoderSessionSummaries(
+      [],
+      [
+        {
+          sessionId: "same-raw-session",
+          firstMessage: "Global Qoder 会话",
+          updatedAt: 20,
+          providerProfileId: "__qoder_global__",
+        },
+        {
+          sessionId: "same-raw-session",
+          firstMessage: "CN Qoder 会话",
+          updatedAt: 10,
+          providerProfileId: "__qoder_cn__",
+        },
+      ],
+      "ws-1",
+      {},
+      () => undefined,
+    );
+
+    expect(merged.map((summary) => summary.id).sort()).toEqual([
+      "qoder:__qoder_cn__:same-raw-session",
+      "qoder:__qoder_global__:same-raw-session",
+    ]);
+    expect(
+      merged.find((summary) =>
+        summary.id.startsWith("qoder:__qoder_cn__"),
+      )?.providerProfileId,
+    ).toBe("__qoder_cn__");
+  });
+
+  it("uses the requested distribution when a Qoder history row has an empty owner", () => {
+    expect(
+      normalizeQoderSessionSummaries(
+        [
+          {
+            sessionId: "same-raw-session",
+            firstMessage: "CN",
+            updatedAt: 1,
+            providerProfileId: "",
+          },
+        ],
+        "__qoder_cn__",
+      ),
+    ).toMatchObject([{ providerProfileId: "__qoder_cn__" }]);
+  });
+
   it("keeps explicit empty disk size and does not invent zero for missing size", () => {
     expect(extractThreadSizeBytes({ sizeBytes: 0 })).toBe(0);
     expect(extractThreadSizeBytes({ size_bytes: "0" })).toBe(0);

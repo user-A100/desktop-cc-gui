@@ -161,6 +161,162 @@
         std::fs::remove_dir_all(base).ok();
     }
 
+    #[tokio::test]
+    async fn qoder_auto_session_metadata_keeps_same_raw_id_per_distribution() {
+        let base = std::env::temp_dir().join(format!("qoder-auto-session-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let storage_path = base.join("workspaces.json");
+        std::fs::write(&storage_path, "[]").expect("seed storage path");
+        let workspace = workspace_entry("ws-1", "Workspace", "/tmp/ws-1", WorkspaceKind::Main, None);
+        let workspaces = Mutex::new(HashMap::from([(workspace.id.clone(), workspace)]));
+        let global_id = "qoder:__qoder_global__:same-raw-session";
+        let cn_id = "qoder:__qoder_cn__:same-raw-session";
+
+        for (session_id, purpose) in [(global_id, "global-auto"), (cn_id, "cn-auto")] {
+            record_auto_session_metadata_core(
+                &workspaces,
+                &storage_path,
+                "ws-1".to_string(),
+                session_id.to_string(),
+                AutoSessionMetadata {
+                    session_purpose: purpose.to_string(),
+                    visibility: AutoSessionVisibility::SystemAuto,
+                    owner_feature: "qoder-test".to_string(),
+                    auto_archive: Some(false),
+                    created_by: AutoSessionCreatedBy::System,
+                },
+            )
+            .await
+            .expect("record profile-qualified Qoder metadata");
+        }
+
+        let metadata = read_catalog_metadata(&storage_path, "ws-1").expect("read metadata");
+        assert_eq!(
+            metadata
+                .auto_session_by_session_id
+                .get("qoder:ws-1:__qoder_global__:same-raw-session")
+                .map(|metadata| metadata.session_purpose.as_str()),
+            Some("global-auto")
+        );
+        assert_eq!(
+            metadata
+                .auto_session_by_session_id
+                .get("qoder:ws-1:__qoder_cn__:same-raw-session")
+                .map(|metadata| metadata.session_purpose.as_str()),
+            Some("cn-auto")
+        );
+        assert!(!metadata
+            .auto_session_by_session_id
+            .contains_key("qoder:ws-1:same-raw-session"));
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn legacy_qoder_metadata_keys_follow_their_explicit_cn_binding() {
+        let base = std::env::temp_dir().join(format!("qoder-legacy-metadata-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let storage_path = base.join("workspaces.json");
+        std::fs::write(&storage_path, "[]").expect("seed storage path");
+        let legacy_stable_key = "qoder:ws-1:same-raw-session";
+        let auto_session = AutoSessionMetadata {
+            session_purpose: "legacy-cn-auto".to_string(),
+            visibility: AutoSessionVisibility::Hidden,
+            owner_feature: "qoder-test".to_string(),
+            auto_archive: Some(false),
+            created_by: AutoSessionCreatedBy::System,
+        };
+
+        with_catalog_metadata_mutation(&storage_path, "ws-1", |metadata| {
+            metadata.engine_provider_binding_by_session_key.insert(
+                legacy_stable_key.to_string(),
+                EngineProviderBinding {
+                    provider_profile_id: "__qoder_cn__".to_string(),
+                    provider_profile_source: "managed".to_string(),
+                    provider_profile_name: "Qoder CN".to_string(),
+                    provider_availability: "available".to_string(),
+                },
+            );
+            metadata
+                .auto_session_by_session_id
+                .insert(legacy_stable_key.to_string(), auto_session.clone());
+            metadata
+                .auto_session_by_session_id
+                .insert("qoder:same-raw-session".to_string(), auto_session.clone());
+            Ok(())
+        })
+        .expect("seed legacy Qoder metadata");
+
+        let metadata = read_catalog_metadata(&storage_path, "ws-1").expect("read migrated metadata");
+        let canonical_stable_key = "qoder:ws-1:__qoder_cn__:same-raw-session";
+        assert!(metadata
+            .engine_provider_binding_by_session_key
+            .contains_key(canonical_stable_key));
+        assert!(metadata
+            .auto_session_by_session_id
+            .contains_key(canonical_stable_key));
+        assert!(metadata
+            .auto_session_by_session_id
+            .contains_key("qoder:__qoder_cn__:same-raw-session"));
+        assert!(!metadata
+            .auto_session_by_session_id
+            .contains_key(legacy_stable_key));
+        assert!(!metadata
+            .auto_session_by_session_id
+            .contains_key("qoder:same-raw-session"));
+        assert_eq!(
+            auto_session_metadata_for_session(
+                &metadata,
+                "ws-1",
+                "qoder:__qoder_cn__:same-raw-session",
+                "qoder",
+            )
+            .map(|metadata| metadata.session_purpose.as_str()),
+            Some("legacy-cn-auto")
+        );
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn legacy_qoder_metadata_with_unknown_owner_stays_fail_closed() {
+        let legacy_stable_key = "qoder:ws-1:unknown-owner-session";
+        let mut metadata = WorkspaceSessionCatalogMetadata {
+            engine_provider_binding_by_session_key: HashMap::from([(
+                legacy_stable_key.to_string(),
+                EngineProviderBinding {
+                    provider_profile_id: "provider-qoder".to_string(),
+                    provider_profile_source: "managed".to_string(),
+                    provider_profile_name: "Unknown Qoder".to_string(),
+                    provider_availability: "available".to_string(),
+                },
+            )]),
+            auto_session_by_session_id: HashMap::from([(
+                legacy_stable_key.to_string(),
+                AutoSessionMetadata {
+                    session_purpose: "unknown-owner-auto".to_string(),
+                    visibility: AutoSessionVisibility::Hidden,
+                    owner_feature: "qoder-test".to_string(),
+                    auto_archive: Some(false),
+                    created_by: AutoSessionCreatedBy::System,
+                },
+            )]),
+            ..Default::default()
+        };
+
+        normalize_legacy_qoder_catalog_metadata(&mut metadata, "ws-1");
+
+        assert!(metadata
+            .engine_provider_binding_by_session_key
+            .contains_key(legacy_stable_key));
+        assert!(metadata
+            .auto_session_by_session_id
+            .contains_key(legacy_stable_key));
+        assert!(!metadata
+            .auto_session_by_session_id
+            .contains_key("qoder:ws-1:__qoder_global__:unknown-owner-session"));
+    }
+
     #[test]
     fn provider_home_catalog_entry_projects_unavailable_provider_without_disk_fallback() {
         let mut entry = catalog_entry("codex-provider-session", "ws-1", Some("Workspace"), None);

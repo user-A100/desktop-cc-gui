@@ -449,11 +449,13 @@ export async function deletePiSession(
 export async function listQoderSessions(
   workspacePath: string,
   limit?: number | null,
+  providerProfileId?: string | null,
 ): Promise<Record<string, unknown> | unknown[] | null> {
   return traceStartupInvoke("list_qoder_sessions", "global", () =>
     invoke<Record<string, unknown> | unknown[] | null>("list_qoder_sessions", {
       workspacePath,
       limit: limit ?? null,
+      providerProfileId: providerProfileId ?? null,
     }),
   );
 }
@@ -461,20 +463,24 @@ export async function listQoderSessions(
 export async function loadQoderSession(
   workspacePath: string,
   sessionId: string,
+  providerProfileId?: string | null,
 ): Promise<Record<string, unknown> | null> {
   return invoke<Record<string, unknown> | null>("load_qoder_session", {
     workspacePath,
     sessionId,
+    providerProfileId: providerProfileId ?? null,
   });
 }
 
 export async function deleteQoderSession(
   workspacePath: string,
   sessionId: string,
+  providerProfileId?: string | null,
 ): Promise<void> {
   return invoke<void>("delete_qoder_session", {
     workspacePath,
     sessionId,
+    providerProfileId: providerProfileId ?? null,
   });
 }
 

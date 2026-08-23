@@ -11,6 +11,7 @@ import {
 import { syncClaudeModelMappingForProfile } from "../../vendors/activateEngineProviderProfile";
 
 import {
+  loadOrderedSharedCreateProviders,
   loadAuthoritativeModelsForCreateProvider,
   resolveFirstSharedCreateProvider,
   resolveSharedSessionCreateInitialTarget,
@@ -78,6 +79,36 @@ describe("resolveFirstSharedCreateProvider", () => {
       id: "__local_settings_json__",
       name: "本地配置",
       source: "disk",
+    });
+  });
+
+  it("keeps Qoder Global as a fixed managed distribution", () => {
+    expect(
+      resolveFirstSharedCreateProvider(
+        "qoder",
+        [
+          {
+            id: "__qoder_global__",
+            name: "Qoder Global",
+            isLocalProvider: false,
+          },
+        ],
+        "本地配置",
+      ),
+    ).toEqual({
+      id: "__qoder_global__",
+      name: "Qoder Global",
+      source: "managed",
+    });
+  });
+
+  it("keeps the Qoder empty-list fallback as an explicit Global binding", () => {
+    expect(
+      resolveFirstSharedCreateProvider("qoder", [], "本地配置"),
+    ).toEqual({
+      id: "__qoder_global__",
+      name: "Qoder Global",
+      source: "managed",
     });
   });
 });
@@ -258,6 +289,51 @@ describe("resolveSharedSessionCreateInitialTarget", () => {
         model: "kimi-coding/k3",
         providerProfileNameSnapshot: "本地配置",
         providerProfileSource: "disk",
+      }),
+    );
+  });
+
+  it("resolves Qoder to Global without reading an unrelated vendor list", async () => {
+    getEngineModelsMock.mockResolvedValue([
+      {
+        id: "qoder-global-model",
+        model: "qoder-global-model",
+        displayName: "Qoder Global model",
+        description: "",
+        isDefault: true,
+        providerProfileId: "__qoder_global__",
+      },
+    ]);
+
+    const providers = await loadOrderedSharedCreateProviders("qoder");
+    expect(providers).toEqual([
+      {
+        id: "__qoder_global__",
+        name: "Qoder Global",
+        isLocalProvider: false,
+      },
+      {
+        id: "__qoder_cn__",
+        name: "Qoder CN",
+        isLocalProvider: false,
+      },
+    ]);
+
+    const target = await resolveSharedSessionCreateInitialTarget({
+      engine: "qoder",
+      localProviderName: "本地配置",
+      unavailableModelMessage: "Qoder 没有可用 Model。",
+    });
+
+    expect(getEngineModelsMock).toHaveBeenCalledWith("qoder", {
+      providerProfileId: "__qoder_global__",
+    });
+    expect(target).toEqual(
+      expect.objectContaining({
+        engine: "qoder",
+        providerProfileId: "__qoder_global__",
+        providerProfileNameSnapshot: "Qoder Global",
+        providerProfileSource: "managed",
       }),
     );
   });

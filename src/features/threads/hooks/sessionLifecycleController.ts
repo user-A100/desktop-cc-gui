@@ -12,6 +12,8 @@ import {
   LOCAL_PROVIDER_PROFILE_DISPLAY_NAME,
   OPENCODE_LOCAL_PROVIDER_PROFILE_ID,
   PI_LOCAL_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_NAME,
   QODER_LOCAL_PROVIDER_PROFILE_ID,
   type EngineProviderProfileOption,
 } from "../constants/codexProviderProfiles";
@@ -210,10 +212,18 @@ export function localProviderBindingForEngine(
                 : engine === "dsh"
                   ? DSH_LOCAL_PROVIDER_PROFILE_ID
                   : engine === "qoder"
-                    ? QODER_LOCAL_PROVIDER_PROFILE_ID
+                    ? QODER_GLOBAL_PROVIDER_PROFILE_ID
                     : null;
   if (!localId) {
     return {};
+  }
+  if (engine === "qoder") {
+    return {
+      providerProfileId: QODER_GLOBAL_PROVIDER_PROFILE_ID,
+      providerProfileName: QODER_GLOBAL_PROVIDER_PROFILE_NAME,
+      providerProfileSource: "managed",
+      providerAvailability: "available",
+    };
   }
   return {
     providerProfileId: localId,

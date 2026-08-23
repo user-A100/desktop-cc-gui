@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { useEventCallback } from "../../../utils/useEventCallback";
+import type { QoderSettingsHighlightTarget } from "../../app/hooks/useSettingsModalState";
 import { shouldUpgradeComposerFromLight } from "../utils/composerGateUpgrade";
 import { getStartupGateReadyReason } from "../../startup-orchestration/utils/startupGateReady";
 import type {
@@ -308,7 +309,9 @@ export type ComposerProps = {
   onOpenAgentSettings?: () => void;
   onOpenPromptSettings?: () => void;
   onOpenModelSettings?: (providerId?: string) => void;
-  onOpenCliSettings?: () => void;
+  onOpenCliSettings?: (
+    highlightTarget?: QoderSettingsHighlightTarget,
+  ) => void;
   onRefreshModelConfig?: (providerId?: string) => Promise<void> | void;
   isModelConfigRefreshing?: boolean;
   onForkQuickStart?: () => void;

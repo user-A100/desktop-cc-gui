@@ -2922,6 +2922,7 @@ export function useThreads({
     resolvePendingThreadForTurn,
     getActiveTurnIdForThread: (threadId: string) =>
       state.activeTurnIdByThread[threadId] ?? null,
+    getThreadProviderProfileId,
     hasEstablishedThreadItems: (threadId: string) =>
       (state.itemsByThread[threadId]?.length ?? 0) > 0,
     renamePendingMemoryCaptureKey,

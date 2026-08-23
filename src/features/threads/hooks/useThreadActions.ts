@@ -112,8 +112,14 @@ import {
   type GeminiSessionSummary,
   type GrokSessionSummary,
   type KimiSessionSummary,
+  type QoderSessionSummary,
   type DshSessionSummary,
 } from "./useThreadActions.helpers";
+import {
+  QODER_CN_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_ID,
+} from "../constants/codexProviderProfiles";
+import { canonicalQoderThreadId } from "../utils/qoderSessionIdentity";
 import { buildPartialHistoryDiagnostic } from "../utils/stabilityDiagnostics";
 import { buildThreadDebugCorrelation } from "../utils/threadDebugCorrelation";
 import { useThreadActionsSessionRuntime } from "./useThreadActionsSessionRuntime";
@@ -214,7 +220,7 @@ export function useThreadActions({
   >({});
   const piRefreshAttemptedRef = useRef<Record<string, boolean>>({});
   const qoderSessionCacheRef = useRef<
-    Record<string, { fetchedAt: number; sessions: KimiSessionSummary[] }>
+    Record<string, { fetchedAt: number; sessions: QoderSessionSummary[] }>
   >({});
   const qoderRefreshAttemptedRef = useRef<Record<string, boolean>>({});
   const grokSessionCacheRef = useRef<
@@ -599,6 +605,7 @@ export function useThreadActions({
             hideSet: earlyPaintHideSet,
             currentThreads: threadsByWorkspace[workspace.id],
             lastGood: getLastGoodThreadSummariesWithoutDeleted(),
+            hideReady: canProjectIndexNatives,
           });
           if (earlyIndexSummaries.length > 0) {
             // Urgent early paint still yields one macrotask when a click is
@@ -1741,11 +1748,19 @@ export function useThreadActions({
           allSummaries = mergeQoderSessionSummaries(
             allSummaries,
             cachedQoder.sessions.filter(
-              (session) =>
-                !threadIdInHiddenSharedBindingSet(
-                  `qoder:${session.sessionId}`,
-                  hiddenSharedBindingIds,
-                ),
+              (session) => {
+                const threadId = canonicalQoderThreadId(
+                  session.sessionId,
+                  session.providerProfileId,
+                );
+                return (
+                  !!threadId &&
+                  !threadIdInHiddenSharedBindingSet(
+                    threadId,
+                    hiddenSharedBindingIds,
+                  )
+                );
+              },
             ),
             workspace.id,
             mappedTitles,
@@ -2525,16 +2540,41 @@ export function useThreadActions({
               latestThreadsByWorkspaceRef.current[workspace.id] ?? [];
             const baselineSummaries =
               currentSnapshot.length > 0 ? currentSnapshot : allSummaries;
+            const sharedSessionsForPiHide = normalizeSharedSessionSummaries(
+              (await withTimeout(
+                listSharedSessionsService(workspace.id).catch(() => []),
+                NATIVE_SESSION_LIST_FETCH_TIMEOUT_MS,
+              )) ?? [],
+            );
+            if (!isLatestThreadListRequest()) {
+              return;
+            }
+            const freshHiddenSharedBindingIds = expandHiddenSharedBindingIds([
+              ...sharedSessionsForPiHide.flatMap(
+                (session) => session.nativeThreadIds,
+              ),
+              ...hiddenSharedBindingIds,
+              ...getCollabWorkerNativeHideIds(),
+            ]);
             const nextSummaries = mergePiSessionSummaries(
               baselineSummaries,
-              normalizedPiSessions,
+              normalizedPiSessions.filter(
+                (session) =>
+                  !threadIdInHiddenSharedBindingSet(
+                    `pi:${session.sessionId}`,
+                    freshHiddenSharedBindingIds,
+                  ),
+              ),
               workspace.id,
               mappedTitles,
               getCustomName,
-              hiddenSharedBindingIds,
+              freshHiddenSharedBindingIds,
             );
             const visibleNextSummaries = applySessionArchiveState(
-              nextSummaries,
+              stripHiddenSharedBindingSummaries(
+                nextSummaries,
+                freshHiddenSharedBindingIds,
+              ),
               await archivedSessionMapPromise,
             );
             if (!isLatestThreadListRequest()) {
@@ -2561,14 +2601,25 @@ export function useThreadActions({
         if (shouldRefreshQoderSessions) {
           void (async () => {
             qoderRefreshAttemptedRef.current[workspace.id] = true;
-            const qoderResult = await withTimeout(
-              listQoderSessionsService(workspace.path, 50),
+            const qoderResults = await withTimeout(
+              Promise.all([
+                listQoderSessionsService(
+                  workspace.path,
+                  50,
+                  QODER_GLOBAL_PROVIDER_PROFILE_ID,
+                ),
+                listQoderSessionsService(
+                  workspace.path,
+                  50,
+                  QODER_CN_PROVIDER_PROFILE_ID,
+                ),
+              ]),
               QODER_SESSION_FETCH_TIMEOUT_MS,
             );
             if (!isLatestThreadListRequest()) {
               return;
             }
-            if (qoderResult === null) {
+            if (qoderResults === null) {
               onDebug?.({
                 id: `${Date.now()}-client-qoder-session-timeout`,
                 timestamp: Date.now(),
@@ -2581,7 +2632,16 @@ export function useThreadActions({
               });
               return;
             }
-            const normalizedQoderSessions = normalizeQoderSessionSummaries(qoderResult);
+            const normalizedQoderSessions = [
+              ...normalizeQoderSessionSummaries(
+                qoderResults[0],
+                QODER_GLOBAL_PROVIDER_PROFILE_ID,
+              ),
+              ...normalizeQoderSessionSummaries(
+                qoderResults[1],
+                QODER_CN_PROVIDER_PROFILE_ID,
+              ),
+            ];
             qoderSessionCacheRef.current[workspace.id] = {
               fetchedAt: Date.now(),
               sessions: normalizedQoderSessions,
@@ -2590,16 +2650,47 @@ export function useThreadActions({
               latestThreadsByWorkspaceRef.current[workspace.id] ?? [];
             const baselineSummaries =
               currentSnapshot.length > 0 ? currentSnapshot : allSummaries;
+            const sharedSessionsForQoderHide = normalizeSharedSessionSummaries(
+              (await withTimeout(
+                listSharedSessionsService(workspace.id).catch(() => []),
+                NATIVE_SESSION_LIST_FETCH_TIMEOUT_MS,
+              )) ?? [],
+            );
+            if (!isLatestThreadListRequest()) {
+              return;
+            }
+            const freshHiddenSharedBindingIds = expandHiddenSharedBindingIds([
+              ...sharedSessionsForQoderHide.flatMap(
+                (session) => session.nativeThreadIds,
+              ),
+              ...hiddenSharedBindingIds,
+              ...getCollabWorkerNativeHideIds(),
+            ]);
             const nextSummaries = mergeQoderSessionSummaries(
               baselineSummaries,
-              normalizedQoderSessions,
+              normalizedQoderSessions.filter((session) => {
+                const threadId = canonicalQoderThreadId(
+                  session.sessionId,
+                  session.providerProfileId,
+                );
+                return (
+                  !!threadId &&
+                  !threadIdInHiddenSharedBindingSet(
+                    threadId,
+                    freshHiddenSharedBindingIds,
+                  )
+                );
+              }),
               workspace.id,
               mappedTitles,
               getCustomName,
-              hiddenSharedBindingIds,
+              freshHiddenSharedBindingIds,
             );
             const visibleNextSummaries = applySessionArchiveState(
-              nextSummaries,
+              stripHiddenSharedBindingSummaries(
+                nextSummaries,
+                freshHiddenSharedBindingIds,
+              ),
               await archivedSessionMapPromise,
             );
             if (!isLatestThreadListRequest()) {

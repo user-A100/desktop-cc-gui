@@ -123,6 +123,12 @@ describe("classifySharedProviderRetryError", () => {
   it("does not auto-retry config, overflow, or recovery states", () => {
     expect(
       classifySharedProviderRetryError({
+        message:
+          "invalid_request_error: Item 'msg_1' of type 'message' was provided without its required reasoning item: 'rs_1'",
+      }),
+    ).toMatchObject({ disposition: "permanent", kind: "config" });
+    expect(
+      classifySharedProviderRetryError({
         message: "unknown model 'claude-opus-5'",
       }),
     ).toMatchObject({ disposition: "permanent", kind: "config" });

@@ -13,6 +13,10 @@ import {
   compareThreadSummariesByCreatedAtDesc,
   pickStableCreatedAt,
 } from "../utils/threadSummarySort";
+import {
+  canonicalQoderThreadId,
+  parseQoderSessionIdentity,
+} from "../utils/qoderSessionIdentity";
 
 const GENERIC_EMPTY_SESSION_TITLE =
   /^(?:(?:claude|codex|gemini|grok|kimi|pi|qoder|opencode|dsh) session(?:\s+[a-f0-9-]{4,40})?|deepseek harness session)$/i;
@@ -122,6 +126,9 @@ export function sessionIndexRowToThreadId(row: SessionIndexRow): string | null {
   if (!engine || !sessionId) {
     return null;
   }
+  if (engine === "qoder") {
+    return canonicalQoderThreadId(sessionId, row.providerProfileId);
+  }
   if (sessionId.includes(":")) {
     return sessionId;
   }
@@ -217,10 +224,16 @@ export function sessionIndexRowsToThreadSummaries(
         : undefined;
     const parentRaw = String(row.parentSessionId ?? "").trim();
     const parentThreadId = parentRaw
-      ? parentRaw.includes(":")
-        ? parentRaw
-        : `${ENGINE_PREFIX[engine] ?? `${engine}:`}${parentRaw}`
+      ? engine === "qoder"
+        ? canonicalQoderThreadId(parentRaw, row.providerProfileId)
+        : parentRaw.includes(":")
+          ? parentRaw
+          : `${ENGINE_PREFIX[engine] ?? `${engine}:`}${parentRaw}`
       : null;
+    const qoderIdentity =
+      engine === "qoder"
+        ? parseQoderSessionIdentity(row.sessionId, row.providerProfileId)
+        : null;
     out.push({
       id,
       name,
@@ -233,8 +246,11 @@ export function sessionIndexRowsToThreadSummaries(
       engineSource: engine,
       threadKind: "native",
       ...(parentThreadId ? { parentThreadId } : {}),
-      ...(row.providerProfileId
-        ? { providerProfileId: String(row.providerProfileId) }
+      ...(qoderIdentity?.providerProfileId || row.providerProfileId
+        ? {
+            providerProfileId:
+              qoderIdentity?.providerProfileId ?? String(row.providerProfileId),
+          }
         : {}),
       ...(row.providerProfileName
         ? { providerProfileName: String(row.providerProfileName) }
@@ -308,15 +324,17 @@ export function stripEmptyClaudeIndexFallbackSummaries(
       return true;
     }
     const engine = summary.engineSource;
-    const hidePlaceholder = shouldHidePlaceholderNativeDraftFromSidebar({
+    // Catalog nicknames like `Agent 12` are weak but real Codex titles.
+    // Do not reuse the Index/sidebar leftover-Agent-N predicate here.
+    const hidePendingDraft = shouldHidePlaceholderNativeDraftFromSidebar({
       engine,
       threadId: summary.id,
       displayName: summary.name,
-    });
+    }) && !/^agent\s+\d+$/i.test(summary.name.trim());
     const hideLegacyClaudeCodex =
       (engine === "claude" || engine === "codex") &&
       isEmptyNativeIndexFallbackSummary(summary);
-    if (!hidePlaceholder && !hideLegacyClaudeCodex) {
+    if (!hidePendingDraft && !hideLegacyClaudeCodex) {
       return true;
     }
     changed = true;

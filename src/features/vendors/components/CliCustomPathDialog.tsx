@@ -13,7 +13,8 @@ export type CliCustomPathEngine =
   | "opencode"
   | "pi"
   | "dsh"
-  | "qoder";
+  | "qoder"
+  | "qoder-cn";
 
 export type CliCustomPathSavePayload = {
   path: string | null;
@@ -43,7 +44,8 @@ const CLI_CUSTOM_PATH_ENGINE_META: Record<
   opencode: { command: "opencode", displayName: "OpenCode CLI" },
   pi: { command: "pi", displayName: "PI CLI" },
   dsh: { command: "dsh", displayName: "DeepSeek Harness" },
-  qoder: { command: "qodercli", displayName: "Qoder CLI" },
+  qoder: { command: "qodercli", displayName: "Qoder Global CLI" },
+  "qoder-cn": { command: "qoderclicn", displayName: "Qoder CN CLI" },
 };
 
 function normalizeNullable(value: string): string | null {

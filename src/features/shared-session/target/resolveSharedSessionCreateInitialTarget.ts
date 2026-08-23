@@ -10,6 +10,10 @@ import type { EngineModelInfo } from "../../../types";
 import { syncClaudeModelMappingForProfile } from "../../vendors/activateEngineProviderProfile";
 import {
   LOCAL_PROVIDER_PROFILE_DISPLAY_NAME,
+  QODER_CN_PROVIDER_PROFILE_ID,
+  QODER_CN_PROVIDER_PROFILE_NAME,
+  QODER_GLOBAL_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_NAME,
 } from "../../threads/constants/codexProviderProfiles";
 import type { SharedSessionSupportedEngine } from "../utils/sharedSessionEngines";
 
@@ -75,6 +79,21 @@ export async function loadOrderedSharedCreateProviders(
     case "pi":
       // PI 无多 Provider store：不拉 vendor 列表，落到本地 sentinel。
       break;
+    case "qoder":
+      // Qoder 没有 provider CRUD。两个 distribution 仍复用 scoped catalog，
+      // 但必须带显式 profile，不能伪装成 local disk provider。
+      return [
+        {
+          id: QODER_GLOBAL_PROVIDER_PROFILE_ID,
+          name: QODER_GLOBAL_PROVIDER_PROFILE_NAME,
+          isLocalProvider: false,
+        },
+        {
+          id: QODER_CN_PROVIDER_PROFILE_ID,
+          name: QODER_CN_PROVIDER_PROFILE_NAME,
+          isLocalProvider: false,
+        },
+      ];
   }
 
   const normalized = raw
@@ -106,6 +125,15 @@ export function resolveFirstSharedCreateProvider(
 ): SharedCreateProviderProfile {
   const first = providers[0];
   if (!first?.id.trim()) {
+    // Qoder 的固定 distribution 不可退化为 generic local sentinel；否则后续
+    // buildSharedSessionInitialTarget 会把 Global binding 归一为 null。
+    if (engine === "qoder") {
+      return {
+        id: QODER_GLOBAL_PROVIDER_PROFILE_ID,
+        name: QODER_GLOBAL_PROVIDER_PROFILE_NAME,
+        source: "managed",
+      };
+    }
     const localId = localProviderSentinelId(engine);
     return {
       id: localId,

@@ -274,8 +274,7 @@ const workspace = {
     "deleteWorktreeFailed": "La eliminación del worktree falló"
   },
   "sharedSession": {
-    "dshUnsupported": "No disponible en Shared Session",
-    "qoderUnsupported": "No disponible en Shared Session"
+    "dshUnsupported": "No disponible en Shared Session"
   }
 };
 

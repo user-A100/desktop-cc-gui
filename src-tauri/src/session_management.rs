@@ -936,10 +936,7 @@ pub(crate) async fn delete_workspace_sessions_core(
         .get_engine_config(engine::EngineType::Pi)
         .await
         .and_then(|item| item.home_dir);
-    let qoder_home_dir = engine_manager
-        .get_engine_config(engine::EngineType::Qoder)
-        .await
-        .and_then(|item| item.home_dir);
+    let qoder_distribution_settings = engine_manager.qoder_distribution_settings().await;
     let dsh_config = engine_manager
         .get_engine_config(engine::EngineType::Dsh)
         .await;
@@ -1023,13 +1020,20 @@ pub(crate) async fn delete_workspace_sessions_core(
             }
             "qoder" => {
                 let workspace_path = target.owner_workspace_path.clone();
-                let qoder_home_dir = qoder_home_dir.clone();
+                let workspace_id = target.owner_workspace_id.clone();
+                let provider_profile_id = target.provider_profile_id.clone();
+                let qoder_distribution_settings = qoder_distribution_settings.clone();
                 let raw_id = target.native_session_id.clone();
                 let handle = tokio::spawn(async move {
-                    engine::qoder_history::delete_qoder_session(
+                    let launch_profile = engine::qoder_provider_profile::resolve_qoder_provider_launch_profile(
+                        &workspace_id,
+                        provider_profile_id.as_deref(),
+                        &qoder_distribution_settings,
+                    )?;
+                    engine::qoder_history::delete_qoder_session_for_launch_profile(
                         &workspace_path,
                         &raw_id,
-                        qoder_home_dir.as_deref(),
+                        &launch_profile,
                     )
                     .await
                 });
@@ -1654,12 +1658,152 @@ fn catalog_metadata_path(storage_path: &Path, workspace_id: &str) -> Result<Path
         .join(format!("{workspace_id}.json")))
 }
 
+fn qoder_legacy_stable_metadata_raw_id<'a>(
+    workspace_id: &str,
+    key: &'a str,
+) -> Option<&'a str> {
+    if qoder_profile_qualified_metadata_key_parts(key).is_some() {
+        return None;
+    }
+    let stable_prefix = format!("qoder:{}:", workspace_id.trim());
+    key.strip_prefix(&stable_prefix)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn qoder_legacy_metadata_profile_by_raw(
+    metadata: &WorkspaceSessionCatalogMetadata,
+    workspace_id: &str,
+) -> HashMap<String, Option<&'static str>> {
+    metadata
+        .engine_provider_binding_by_session_key
+        .iter()
+        .filter_map(|(key, binding)| {
+            let raw_session_id = qoder_legacy_stable_metadata_raw_id(workspace_id, key)?;
+            let provider_profile_id = engine::qoder_provider_profile::qoder_canonical_provider_profile_id(
+                Some(binding.provider_profile_id.as_str()),
+            )
+            .ok();
+            Some((raw_session_id.to_string(), provider_profile_id))
+        })
+        .collect()
+}
+
+fn normalized_qoder_metadata_key(
+    key: &str,
+    workspace_id: &str,
+    profile_by_raw_session_id: &HashMap<String, Option<&'static str>>,
+) -> Option<String> {
+    let key = key.trim();
+    if !key.starts_with("qoder:") || qoder_profile_qualified_metadata_key_parts(key).is_some() {
+        return None;
+    }
+    if let Some(raw_session_id) = qoder_legacy_stable_metadata_raw_id(workspace_id, key) {
+        let provider_profile_id = match profile_by_raw_session_id.get(raw_session_id) {
+            Some(Some(provider_profile_id)) => Some(*provider_profile_id),
+            Some(None) => return None,
+            None => None,
+        };
+        let identity = engine::qoder_provider_profile::parse_qoder_native_session_identity(
+            raw_session_id,
+            provider_profile_id,
+        )
+        .ok()?;
+        return Some(format!(
+            "qoder:{}:{}:{}",
+            workspace_id.trim(), identity.provider_profile_id, identity.raw_session_id
+        ));
+    }
+
+    let identity = engine::qoder_provider_profile::parse_qoder_native_session_identity(key, None).ok()?;
+    if !identity.is_legacy {
+        return Some(identity.canonical_id());
+    }
+    // 旧 alias 的 raw ACP id 没有分发分段；多冒号值无法确定其是否原本是
+    // workspace metadata key，保留原样比猜错 distribution 更安全。
+    if identity.raw_session_id.contains(':') {
+        return None;
+    }
+    let provider_profile_id = match profile_by_raw_session_id.get(identity.raw_session_id.as_str()) {
+        Some(Some(provider_profile_id)) => Some(*provider_profile_id),
+        Some(None) => return None,
+        None => None,
+    };
+    engine::qoder_provider_profile::parse_qoder_native_session_identity(
+        key,
+        provider_profile_id,
+    )
+    .ok()
+    .map(|identity| identity.canonical_id())
+}
+
+fn rekey_legacy_qoder_metadata_map<T>(
+    map: &mut HashMap<String, T>,
+    workspace_id: &str,
+    profile_by_raw_session_id: &HashMap<String, Option<&'static str>>,
+) {
+    let mut legacy_entries = Vec::new();
+    for (key, value) in std::mem::take(map) {
+        match normalized_qoder_metadata_key(&key, workspace_id, profile_by_raw_session_id) {
+            Some(normalized_key) if normalized_key != key => {
+                legacy_entries.push((normalized_key, value));
+            }
+            _ => {
+                map.insert(key, value);
+            }
+        }
+    }
+    // 已经 profile-qualified 的新 key 优先，避免旧 raw alias 覆盖新写入事实。
+    for (normalized_key, value) in legacy_entries {
+        map.entry(normalized_key).or_insert(value);
+    }
+}
+
+/// Read-time compatibility migration for metadata written before Qoder Native
+/// identity carried its distribution. Mutating callers persist the normalized
+/// maps through their existing atomic write; readonly callers still query the
+/// correct Global/CN key without changing user storage.
+fn normalize_legacy_qoder_catalog_metadata(
+    metadata: &mut WorkspaceSessionCatalogMetadata,
+    workspace_id: &str,
+) {
+    let profile_by_raw_session_id =
+        qoder_legacy_metadata_profile_by_raw(metadata, workspace_id);
+    rekey_legacy_qoder_metadata_map(
+        &mut metadata.archived_at_by_session_id,
+        workspace_id,
+        &profile_by_raw_session_id,
+    );
+    rekey_legacy_qoder_metadata_map(
+        &mut metadata.folder_id_by_session_id,
+        workspace_id,
+        &profile_by_raw_session_id,
+    );
+    rekey_legacy_qoder_metadata_map(
+        &mut metadata.auto_session_by_session_id,
+        workspace_id,
+        &profile_by_raw_session_id,
+    );
+    rekey_legacy_qoder_metadata_map(
+        &mut metadata.engine_provider_binding_by_session_key,
+        workspace_id,
+        &profile_by_raw_session_id,
+    );
+    rekey_legacy_qoder_metadata_map(
+        &mut metadata.provider_continuation_by_session_key,
+        workspace_id,
+        &profile_by_raw_session_id,
+    );
+}
+
 fn read_catalog_metadata(
     storage_path: &Path,
     workspace_id: &str,
 ) -> Result<WorkspaceSessionCatalogMetadata, String> {
     let path = catalog_metadata_path(storage_path, workspace_id)?;
-    Ok(read_json_file::<WorkspaceSessionCatalogMetadata>(&path)?.unwrap_or_default())
+    let mut metadata = read_json_file::<WorkspaceSessionCatalogMetadata>(&path)?.unwrap_or_default();
+    normalize_legacy_qoder_catalog_metadata(&mut metadata, workspace_id);
+    Ok(metadata)
 }
 
 pub(crate) fn read_workspace_session_folder_assignments(
@@ -1699,8 +1843,13 @@ fn write_catalog_metadata_unlocked(
     write_string_atomically(path, &data)
 }
 
-fn read_catalog_metadata_from_path(path: &Path) -> Result<WorkspaceSessionCatalogMetadata, String> {
-    Ok(read_json_file::<WorkspaceSessionCatalogMetadata>(path)?.unwrap_or_default())
+fn read_catalog_metadata_from_path(
+    path: &Path,
+    workspace_id: &str,
+) -> Result<WorkspaceSessionCatalogMetadata, String> {
+    let mut metadata = read_json_file::<WorkspaceSessionCatalogMetadata>(path)?.unwrap_or_default();
+    normalize_legacy_qoder_catalog_metadata(&mut metadata, workspace_id);
+    Ok(metadata)
 }
 
 fn with_catalog_metadata_mutation<T>(
@@ -1710,7 +1859,7 @@ fn with_catalog_metadata_mutation<T>(
 ) -> Result<T, String> {
     let path = catalog_metadata_path(storage_path, workspace_id)?;
     with_storage_lock(&path, || {
-        let mut metadata = read_catalog_metadata_from_path(&path)?;
+        let mut metadata = read_catalog_metadata_from_path(&path, workspace_id)?;
         let result = mutation(&mut metadata)?;
         write_catalog_metadata_unlocked(&path, &metadata)?;
         Ok(result)
@@ -1865,14 +2014,40 @@ fn apply_strict_attribution_owner(
     apply_attribution_to_entry(entry, attribution)
 }
 
+fn qoder_profile_qualified_metadata_key_parts(session_id: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = session_id.splitn(4, ':');
+    if parts.next()? != "qoder" {
+        return None;
+    }
+    let workspace_id = parts.next()?.trim();
+    let provider_profile_id = parts.next()?.trim();
+    let raw_session_id = parts.next()?.trim();
+    if workspace_id.is_empty()
+        || raw_session_id.is_empty()
+        || !matches!(
+            provider_profile_id,
+            crate::engine::qoder_provider_profile::QODER_GLOBAL_PROVIDER_PROFILE_ID
+                | crate::engine::qoder_provider_profile::QODER_CN_PROVIDER_PROFILE_ID
+        )
+    {
+        return None;
+    }
+    Some((workspace_id, provider_profile_id, raw_session_id))
+}
+
 fn is_stable_catalog_metadata_key(session_id: &str) -> bool {
     let mut parts = session_id.splitn(3, ':');
     let engine = parts.next().unwrap_or_default();
     let workspace_id = parts.next().unwrap_or_default();
     let canonical_session_id = parts.next().unwrap_or_default();
+    if engine == "qoder" {
+        // `qoder:<profile>:<raw>` 是 durable Native identity，不是
+        // workspace-scoped metadata key；后者必须多出一个 profile segment。
+        return qoder_profile_qualified_metadata_key_parts(session_id).is_some();
+    }
     matches!(
         engine,
-        "codex" | "claude" | "gemini" | "grok" | "kimi" | "pi" | "qoder" | "opencode" | "shared"
+        "codex" | "claude" | "gemini" | "grok" | "kimi" | "pi" | "opencode" | "shared"
     ) && !workspace_id.trim().is_empty()
         && !canonical_session_id.trim().is_empty()
 }
@@ -1881,12 +2056,30 @@ fn engine_provider_binding_stable_key(
     workspace_id: &str,
     session_id: &str,
     engine: &str,
+    provider_profile_id: Option<&str>,
 ) -> Option<String> {
     let workspace_id = workspace_id.trim();
     let session_id = session_id.trim();
     let engine = engine.trim().to_ascii_lowercase();
     if workspace_id.is_empty() || session_id.is_empty() || engine.is_empty() {
         return None;
+    }
+
+    if engine == "qoder" {
+        if qoder_profile_qualified_metadata_key_parts(session_id)
+            .is_some_and(|(stored_workspace_id, _, _)| stored_workspace_id == workspace_id)
+        {
+            return Some(session_id.to_string());
+        }
+        let identity = crate::engine::qoder_provider_profile::parse_qoder_native_session_identity(
+            session_id,
+            provider_profile_id,
+        )
+        .ok()?;
+        return Some(format!(
+            "qoder:{workspace_id}:{}:{}",
+            identity.provider_profile_id, identity.raw_session_id
+        ));
     }
 
     let canonical_session_id = if is_stable_catalog_metadata_key(session_id) {
@@ -1900,16 +2093,59 @@ fn engine_provider_binding_stable_key(
 }
 
 fn metadata_stable_key_for_session_id(workspace_id: &str, session_id: &str) -> String {
+    let workspace_id = workspace_id.trim();
+    let session_id = session_id.trim();
+    if session_id.starts_with("qoder:") {
+        if qoder_profile_qualified_metadata_key_parts(session_id)
+            .is_some_and(|(stored_workspace_id, _, _)| stored_workspace_id == workspace_id)
+        {
+            return session_id.to_string();
+        }
+        let identity = parse_catalog_identity(session_id);
+        if let SessionCatalogIdentity::Qoder {
+            session_id,
+            provider_profile_id: Some(provider_profile_id),
+        } = &identity
+        {
+            return format!("qoder:{workspace_id}:{provider_profile_id}:{session_id}");
+        }
+    }
     if is_stable_catalog_metadata_key(session_id) {
-        return session_id.trim().to_string();
+        return session_id.to_string();
     }
     let identity = parse_catalog_identity(session_id);
+    if let SessionCatalogIdentity::Qoder {
+        session_id,
+        provider_profile_id: Some(provider_profile_id),
+    } = &identity
+    {
+        return format!("qoder:{workspace_id}:{provider_profile_id}:{session_id}");
+    }
     format!(
         "{}:{}:{}",
         identity.engine_name(),
         workspace_id,
         identity.raw_session_id()
     )
+}
+
+fn append_legacy_global_qoder_metadata_key(
+    keys: &mut Vec<String>,
+    workspace_id: &str,
+    session_id: &str,
+    provider_profile_id: Option<&str>,
+) {
+    let Ok(identity) = crate::engine::qoder_provider_profile::parse_qoder_native_session_identity(
+        session_id,
+        provider_profile_id,
+    ) else {
+        return;
+    };
+    if identity.provider_profile_id
+        == crate::engine::qoder_provider_profile::QODER_GLOBAL_PROVIDER_PROFILE_ID
+    {
+        keys.push(format!("qoder:{workspace_id}:{}", identity.raw_session_id));
+    }
 }
 
 fn folder_assignment_keys_for_session(session_id: &str, engine: &str) -> Vec<String> {
@@ -1978,6 +2214,14 @@ fn catalog_metadata_lookup_keys_for_entry(entry: &WorkspaceSessionCatalogEntry) 
         &entry.session_id,
         &entry.engine,
     ));
+    if entry.engine.eq_ignore_ascii_case("qoder") {
+        append_legacy_global_qoder_metadata_key(
+            &mut keys,
+            &entry.workspace_id,
+            &entry.session_id,
+            entry.provider_profile_id.as_deref(),
+        );
+    }
     append_legacy_codex_continuation_key(
         &mut keys,
         &entry.workspace_id,
@@ -1996,6 +2240,9 @@ fn catalog_metadata_lookup_keys_for_session(
 ) -> Vec<String> {
     let mut keys = vec![metadata_stable_key_for_session_id(workspace_id, session_id)];
     keys.extend(folder_assignment_keys_for_session(session_id, engine));
+    if engine.eq_ignore_ascii_case("qoder") {
+        append_legacy_global_qoder_metadata_key(&mut keys, workspace_id, session_id, None);
+    }
     append_legacy_codex_continuation_key(&mut keys, workspace_id, session_id, engine);
     keys.sort();
     keys.dedup();
@@ -2023,7 +2270,11 @@ pub(crate) fn engine_provider_binding_for_session(
     session_id: &str,
     engine: &str,
 ) -> Option<EngineProviderBinding> {
-    engine_provider_binding_stable_key(workspace_id, session_id, engine)
+    if engine.eq_ignore_ascii_case("qoder") {
+        return qoder_provider_binding_for_session(metadata, workspace_id, session_id);
+    }
+
+    engine_provider_binding_stable_key(workspace_id, session_id, engine, None)
         .and_then(|key| {
             metadata
                 .engine_provider_binding_by_session_key
@@ -2036,6 +2287,109 @@ pub(crate) fn engine_provider_binding_for_session(
                 .then(|| codex_provider_binding_for_session(metadata, workspace_id, session_id))
                 .flatten()
         })
+}
+
+fn qoder_provider_binding_matches_profile(
+    binding: &EngineProviderBinding,
+    provider_profile_id: &str,
+) -> bool {
+    matches!(
+        crate::engine::qoder_provider_profile::qoder_canonical_provider_profile_id(Some(
+            binding.provider_profile_id.as_str(),
+        )),
+        Ok(binding_provider_profile_id) if binding_provider_profile_id == provider_profile_id
+    )
+}
+
+fn unique_rekeyed_qoder_binding_for_legacy_session(
+    metadata: &WorkspaceSessionCatalogMetadata,
+    workspace_id: &str,
+    raw_session_id: &str,
+) -> Option<EngineProviderBinding> {
+    let mut matched_binding = None;
+    for (key, binding) in &metadata.engine_provider_binding_by_session_key {
+        let Some((stored_workspace_id, stored_profile_id, stored_raw_session_id)) =
+            qoder_profile_qualified_metadata_key_parts(key)
+        else {
+            continue;
+        };
+        if stored_workspace_id != workspace_id
+            || stored_raw_session_id != raw_session_id
+            || !qoder_provider_binding_matches_profile(binding, stored_profile_id)
+        {
+            continue;
+        }
+        if matched_binding.is_some() {
+            return None;
+        }
+        matched_binding = Some(binding.clone());
+    }
+    matched_binding
+}
+
+fn legacy_qoder_session_has_unresolved_binding(
+    metadata: &WorkspaceSessionCatalogMetadata,
+    workspace_id: &str,
+    raw_session_id: &str,
+) -> bool {
+    let legacy_stable_key = format!("qoder:{workspace_id}:{raw_session_id}");
+    let legacy_alias_key = format!("qoder:{raw_session_id}");
+    metadata
+        .engine_provider_binding_by_session_key
+        .iter()
+        .any(|(key, binding)| {
+            if key == &legacy_stable_key || key == &legacy_alias_key {
+                return crate::engine::qoder_provider_profile::qoder_canonical_provider_profile_id(
+                    Some(binding.provider_profile_id.as_str()),
+                )
+                .is_err();
+            }
+            qoder_profile_qualified_metadata_key_parts(key).is_some_and(
+                |(stored_workspace_id, stored_profile_id, stored_raw_session_id)| {
+                    stored_workspace_id == workspace_id
+                        && stored_raw_session_id == raw_session_id
+                        && !qoder_provider_binding_matches_profile(binding, stored_profile_id)
+                },
+            )
+        })
+}
+
+fn qoder_provider_binding_for_session(
+    metadata: &WorkspaceSessionCatalogMetadata,
+    workspace_id: &str,
+    session_id: &str,
+) -> Option<EngineProviderBinding> {
+    let identity = crate::engine::qoder_provider_profile::parse_qoder_native_session_identity(
+        session_id,
+        None,
+    )
+    .ok()?;
+    let stable_key = engine_provider_binding_stable_key(workspace_id, session_id, "qoder", None)?;
+    if let Some(binding) = metadata.engine_provider_binding_by_session_key.get(&stable_key) {
+        return qoder_provider_binding_matches_profile(binding, identity.provider_profile_id)
+            .then(|| binding.clone());
+    }
+
+    let legacy_key = format!("qoder:{workspace_id}:{}", identity.raw_session_id);
+    if let Some(binding) = metadata.engine_provider_binding_by_session_key.get(&legacy_key) {
+        let binding_provider_profile_id = crate::engine::qoder_provider_profile::qoder_canonical_provider_profile_id(
+            Some(binding.provider_profile_id.as_str()),
+        )
+        .ok()?;
+        return (identity.is_legacy || binding_provider_profile_id == identity.provider_profile_id)
+            .then(|| binding.clone());
+    }
+
+    identity
+        .is_legacy
+        .then(|| {
+            unique_rekeyed_qoder_binding_for_legacy_session(
+                metadata,
+                workspace_id,
+                &identity.raw_session_id,
+            )
+        })
+        .flatten()
 }
 
 pub(crate) fn provider_profile_id_for_session_at_path(
@@ -2117,13 +2471,57 @@ pub(crate) fn resolve_engine_provider_profile_id(
     engine: &str,
     requested_provider_profile_id: Option<&str>,
 ) -> Result<Option<String>, String> {
-    if let Some(requested) = requested_provider_profile_id
+    let requested_provider_profile_id = requested_provider_profile_id
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+        .filter(|value| !value.is_empty());
+    let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
+
+    if engine.eq_ignore_ascii_case("qoder") {
+        if let Some(session_id) = session_id {
+            let identity = engine::qoder_provider_profile::parse_qoder_native_session_identity(
+                session_id,
+                requested_provider_profile_id,
+            )?;
+
+            // A canonical id or explicitly requested distribution is authoritative.
+            // Old raw ids have no durable distribution in their text, so retain a
+            // pre-migration binding when one exists before falling back to Global.
+            if !identity.is_legacy
+                || engine::qoder_provider_profile::has_explicit_qoder_distribution_owner(
+                    requested_provider_profile_id,
+                )
+            {
+                return Ok(Some(identity.provider_profile_id.to_string()));
+            }
+            let metadata = read_catalog_metadata(storage_path, workspace_id)?;
+            if let Some(binding) =
+                engine_provider_binding_for_session(&metadata, workspace_id, session_id, engine)
+            {
+                let provider_profile_id =
+                    engine::qoder_provider_profile::qoder_canonical_provider_profile_id(Some(
+                        binding.provider_profile_id.as_str(),
+                    ))?;
+                return Ok(Some(provider_profile_id.to_string()));
+            }
+            if legacy_qoder_session_has_unresolved_binding(
+                &metadata,
+                workspace_id,
+                &identity.raw_session_id,
+            ) {
+                return Err(format!(
+                    "Qoder legacy session `{}` has an unresolved provider binding; refusing Global fallback",
+                    identity.raw_session_id
+                ));
+            }
+            return Ok(Some(identity.provider_profile_id.to_string()));
+        }
+        return Ok(requested_provider_profile_id.map(ToString::to_string));
+    }
+
+    if let Some(requested) = requested_provider_profile_id {
         return Ok(Some(requested.to_string()));
     }
-    let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(session_id) = session_id else {
         return Ok(None);
     };
     let metadata = read_catalog_metadata(storage_path, workspace_id)?;
@@ -2555,11 +2953,16 @@ pub(crate) fn record_engine_provider_binding_at_path(
         .into_iter()
         .next()
         .ok_or_else(|| "session_id is required".to_string())?;
-    let stable_key = engine_provider_binding_stable_key(&workspace_id, &session_id, engine)
-        .ok_or_else(|| "engine is required".to_string())?;
+    let stable_key = engine_provider_binding_stable_key(
+        &workspace_id,
+        &session_id,
+        engine,
+        Some(binding.provider_profile_id.as_str()),
+    )
+    .ok_or_else(|| "engine is required".to_string())?;
     let path = catalog_metadata_path(storage_path, &workspace_id)?;
     with_storage_lock(&path, || {
-        let mut metadata = read_catalog_metadata_from_path(&path)?;
+        let mut metadata = read_catalog_metadata_from_path(&path, &workspace_id)?;
         if metadata
             .engine_provider_binding_by_session_key
             .get(&stable_key)
@@ -2989,6 +3392,9 @@ async fn build_global_engine_catalog_entries(
     let workspace_entries = workspaces_snapshot.values().cloned().collect::<Vec<_>>();
     let metadata_by_workspace_id =
         read_catalog_metadata_for_scope(storage_path, &workspace_entries)?;
+    let shared_event_log_path = storage_path
+        .parent()
+        .map(|parent| parent.join("shared-event-log-v2.sqlite3"));
     let mut entries = if include_engine("codex") {
         build_global_codex_catalog_entries(workspaces, storage_path, scan_mode, scan_quality)
             .await?
@@ -3422,7 +3828,11 @@ async fn build_global_engine_catalog_entries(
         }
 
         if include_engine("shared") {
-            match crate::shared_sessions::list_workspace_shared_sessions(&workspace.id, None) {
+            match crate::shared_sessions::list_workspace_shared_sessions(
+                &workspace.id,
+                None,
+                shared_event_log_path.as_deref(),
+            ) {
                 Ok(shared_sessions) => {
                     let owner_metadata = metadata_by_workspace_id
                         .get(&workspace.id)

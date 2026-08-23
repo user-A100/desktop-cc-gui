@@ -55,12 +55,14 @@ export function resolveEngineProviderLabel(thread: ThreadSummary) {
   if (
     engine === "pi" ||
     engine === "dsh" ||
-    engine === "qoder" ||
     engine === "grok" ||
     engine === "kimi" ||
     engine === "opencode"
   ) {
     return "local";
+  }
+  if (engine === "qoder") {
+    return "Qoder Global";
   }
   return null;
 }

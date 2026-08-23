@@ -86,7 +86,16 @@ vi.mock("../../curated-skills/hooks/useCuratedSkills", () => ({
 }));
 
 vi.mock("../../vendors/components/VendorSettingsPanel", () => ({
-  VendorSettingsPanel: () => <div data-testid="vendor-settings-panel" />,
+  VendorSettingsPanel: (props: {
+    initialCli?: string;
+    initialQoderDistribution?: string;
+  }) => (
+    <div
+      data-testid="vendor-settings-panel"
+      data-initial-cli={props.initialCli}
+      data-initial-qoder-distribution={props.initialQoderDistribution}
+    />
+  ),
 }));
 
 vi.mock("../../../services/tauri", async () => {
@@ -223,6 +232,9 @@ const baseSettings: AppSettings = {
   kimiBin: null,
   piBin: null,
   qoderBin: null,
+  qoderConfigDir: null,
+  qoderCnBin: null,
+  qoderCnConfigDir: null,
   grokBin: null,
   opencodeBin: null,
   dshBin: null,
@@ -404,6 +416,9 @@ const renderDisplaySection = (
       typeof SettingsView
     >["onWindowOpacityChange"];
     initialSection?: ComponentProps<typeof SettingsView>["initialSection"] | null;
+    initialHighlightTarget?: ComponentProps<
+      typeof SettingsView
+    >["initialHighlightTarget"];
   } = {},
 ) => {
   cleanup();
@@ -447,6 +462,7 @@ const renderDisplaySection = (
       options.initialSection === null
         ? undefined
         : (options.initialSection ?? "basic"),
+    initialHighlightTarget: options.initialHighlightTarget,
   };
 
   const view = render(<SettingsView {...props} />);
@@ -616,6 +632,18 @@ describe("SettingsView projects display", () => {
 });
 
 describe("SettingsView Display", () => {
+  it("routes a Qoder CN deep link to the Qoder vendor card", async () => {
+    renderDisplaySection({
+      initialSection: "providers",
+      initialHighlightTarget: "qoder-cn",
+    });
+    await flushSettingsViewEffects();
+
+    const panel = screen.getByTestId("vendor-settings-panel");
+    expect(panel.getAttribute("data-initial-cli")).toBe("qoder");
+    expect(panel.getAttribute("data-initial-qoder-distribution")).toBe("cn");
+  });
+
   it("uses the in-content page head for the active settings section title and description", async () => {
     renderDisplaySection({ initialSection: null });
     await flushSettingsViewEffects();

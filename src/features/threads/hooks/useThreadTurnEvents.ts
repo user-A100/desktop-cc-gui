@@ -35,6 +35,7 @@ import { renameRuntimeReceipt } from "../utils/runtimeModelReceipt";
 import { noteSharedProviderRetryTurnSettled } from "../../shared-session/provider-retry/noteSharedProviderRetryTurn";
 import { getSharedTargetState } from "../../shared-session/target/targetStore";
 import { isSharedSessionThreadId } from "../../shared-session/utils/sharedSessionIdentity";
+import { isSharedOwnedNativeThreadId } from "../../shared-session/runtime/sharedSessionBridge";
 import type { EngineType } from "../../../types";
 import {
   hasCodexBackgroundHelperPreview,
@@ -53,12 +54,30 @@ import {
   isPendingSessionForEngine,
 } from "../contracts/engineRuntimeIdentity";
 import type { ThreadAction } from "./useThreadsReducer";
+import {
+  canonicalQoderProviderProfileId,
+  canonicalQoderThreadId,
+  parseQoderSessionIdentity,
+} from "../utils/qoderSessionIdentity";
 
 /**
  * Infer engine type from thread ID.
  * Claude/Gemini/Kimi/OpenCode threads use "<engine>:" or "<engine>-pending-" prefixes.
  */
 const inferEngineFromThreadId = inferEngineFromLegacyThreadId;
+
+function resolveQoderProviderProfileIdForThread(
+  getThreadProviderProfileId: UseThreadTurnEventsOptions["getThreadProviderProfileId"],
+  workspaceId: string,
+  threadId: string,
+): string | null {
+  const storedProfileId =
+    getThreadProviderProfileId?.(workspaceId, threadId) ?? null;
+  if (threadId.startsWith("qoder:")) {
+    return parseQoderSessionIdentity(threadId, storedProfileId)?.providerProfileId ?? null;
+  }
+  return canonicalQoderProviderProfileId(storedProfileId);
+}
 
 function noteSharedRetryFromTurn(
   workspaceId: string,
@@ -266,6 +285,10 @@ type UseThreadTurnEventsOptions = {
     turnId: string | null | undefined,
   ) => string | null;
   getActiveTurnIdForThread?: (threadId: string) => string | null;
+  getThreadProviderProfileId?: (
+    workspaceId: string,
+    threadId: string,
+  ) => string | null | undefined;
   hasEstablishedThreadItems?: (threadId: string) => boolean;
   renamePendingMemoryCaptureKey: (
     oldThreadId: string,
@@ -296,6 +319,7 @@ export function useThreadTurnEvents({
   resolvePendingThreadForSession,
   resolvePendingThreadForTurn,
   getActiveTurnIdForThread,
+  getThreadProviderProfileId,
   hasEstablishedThreadItems,
   renamePendingMemoryCaptureKey,
   onDebug,
@@ -456,6 +480,9 @@ export function useThreadTurnEvents({
       if (isThreadHidden(workspaceId, threadId)) {
         return;
       }
+      if (isSharedOwnedNativeThreadId(workspaceId, threadId)) {
+        return;
+      }
       const customName = getCustomName(workspaceId, threadId);
       const canApplyLiveName =
         !customName && !isAutoTitlePending(workspaceId, threadId);
@@ -521,12 +548,31 @@ export function useThreadTurnEvents({
       if (workspaceScopedHas(pendingInterruptsRef.current, workspaceId, threadId)) {
         workspaceScopedDelete(pendingInterruptsRef.current, workspaceId, threadId);
         const engine = inferEngineFromThreadId(threadId);
+        const qoderProviderProfileId =
+          engine === "qoder"
+            ? resolveQoderProviderProfileIdForThread(
+                getThreadProviderProfileId,
+                workspaceId,
+                threadId,
+              )
+            : null;
         if (engine === "codex" && turnId) {
           void interruptTurnService(workspaceId, threadId, turnId).catch(() => {});
         } else if (turnId) {
-          void engineInterruptTurnService(workspaceId, turnId, engine).catch(() => {
-            // Fallback for older runtimes missing turn-scoped interrupt.
-            void engineInterruptService(workspaceId).catch(() => {});
+          const interrupt = qoderProviderProfileId
+            ? engineInterruptTurnService(
+                workspaceId,
+                turnId,
+                engine,
+                qoderProviderProfileId,
+              )
+            : engineInterruptTurnService(workspaceId, turnId, engine);
+          void interrupt.catch(() => {
+            // Qoder 的旧 workspace-wide interrupt 不携带 distribution，不能
+            // 作为 Qoder Global/CN 的兼容降级路径。
+            if (engine !== "qoder") {
+              void engineInterruptService(workspaceId).catch(() => {});
+            }
           });
         }
         return;
@@ -536,7 +582,13 @@ export function useThreadTurnEvents({
         setActiveTurnId(threadId, turnId);
       }
     },
-    [dispatch, markProcessing, pendingInterruptsRef, setActiveTurnId],
+    [
+      dispatch,
+      getThreadProviderProfileId,
+      markProcessing,
+      pendingInterruptsRef,
+      setActiveTurnId,
+    ],
   );
 
   const onTurnCompleted = useCallback(
@@ -1330,7 +1382,58 @@ export function useThreadTurnEvents({
         return;
       }
 
-      const newThreadId = `${enginePrefix}:${sessionId}`;
+      const qoderEventIdentity =
+        enginePrefix === "qoder" && threadId.startsWith("qoder:")
+          ? parseQoderSessionIdentity(
+              threadId,
+              getThreadProviderProfileId?.(workspaceId, threadId) ?? null,
+            )
+          : null;
+      if (enginePrefix === "qoder" && threadId.startsWith("qoder:") && !qoderEventIdentity) {
+        logSessionTrace("skip:conflicting-qoder-runtime-owner", {
+          workspaceId,
+          threadId,
+          sessionId,
+          enginePrefix,
+        });
+        return;
+      }
+      const qoderProviderProfileId =
+        enginePrefix === "qoder"
+          ? (qoderEventIdentity?.providerProfileId ??
+            resolveQoderProviderProfileIdForThread(
+              getThreadProviderProfileId,
+              workspaceId,
+              threadId,
+            ) ??
+            resolveQoderProviderProfileIdForThread(
+              getThreadProviderProfileId,
+              workspaceId,
+              pendingByEngine.qoder ?? "",
+            ))
+          : null;
+      const newThreadId =
+        enginePrefix === "qoder"
+          ? canonicalQoderThreadId(sessionId, qoderProviderProfileId)
+          : `${enginePrefix}:${sessionId}`;
+      if (!newThreadId) {
+        logSessionTrace("skip:invalid-qoder-session-identity", {
+          workspaceId,
+          threadId,
+          sessionId,
+          enginePrefix,
+        });
+        return;
+      }
+      const qoderEventSessionIdentity =
+        enginePrefix === "qoder"
+          ? parseQoderSessionIdentity(sessionId, qoderProviderProfileId)
+          : null;
+      const isQoderLegacyIdentityUpgrade =
+        enginePrefix === "qoder" &&
+        qoderEventIdentity?.isLegacy === true &&
+        qoderEventSessionIdentity?.rawSessionId ===
+          qoderEventIdentity.rawSessionId;
       const turnBoundPendingThreadId =
         resolvePendingThreadForTurn?.(workspaceId, enginePrefix, turnId) ?? null;
 
@@ -1367,6 +1470,7 @@ export function useThreadTurnEvents({
       if (
         threadId.startsWith(sameEngineFinalizedPrefix)
         && threadId !== newThreadId
+        && !isQoderLegacyIdentityUpgrade
       ) {
         logSessionTrace("skip:finalized-mismatch", {
           workspaceId,
@@ -1422,6 +1526,10 @@ export function useThreadTurnEvents({
           return;
         }
       } else if (isPendingThreadForEngine(enginePrefix, threadId)) {
+        sourceThreadId = threadId;
+      } else if (isQoderLegacyIdentityUpgrade) {
+        // 旧版 `qoder:<raw>` 已是 finalized id，但还没有 distribution。
+        // 同一 raw ACP id 的 SessionStarted 仅升级 identity，不能当成换会话拒绝。
         sourceThreadId = threadId;
       } else if (!hasAnyEnginePrefix && !hasForeignEnginePrefix) {
         const pendingThreadId = pendingByEngine[enginePrefix];
@@ -1493,12 +1601,31 @@ export function useThreadTurnEvents({
         const activeTurnId = getActiveTurnIdForThread?.(newThreadId) ?? null;
         if (activeTurnId) {
           workspaceScopedDelete(pendingInterruptsRef.current, workspaceId, newThreadId);
-          void engineInterruptTurnService(
-            workspaceId,
-            activeTurnId,
-            enginePrefix,
-          ).catch(() => {
-            void engineInterruptService(workspaceId).catch(() => {});
+          const qoderProviderProfileId =
+            enginePrefix === "qoder"
+              ? (resolveQoderProviderProfileIdForThread(
+                  getThreadProviderProfileId,
+                  workspaceId,
+                  sourceThreadId,
+                ) ??
+                resolveQoderProviderProfileIdForThread(
+                  getThreadProviderProfileId,
+                  workspaceId,
+                  newThreadId,
+                ))
+              : null;
+          const interrupt = qoderProviderProfileId
+            ? engineInterruptTurnService(
+                workspaceId,
+                activeTurnId,
+                enginePrefix,
+                qoderProviderProfileId,
+              )
+            : engineInterruptTurnService(workspaceId, activeTurnId, enginePrefix);
+          void interrupt.catch(() => {
+            if (enginePrefix !== "qoder") {
+              void engineInterruptService(workspaceId).catch(() => {});
+            }
           });
         }
       }
@@ -1535,6 +1662,7 @@ export function useThreadTurnEvents({
       resolvePendingThreadForTurn,
       migrateThreadInterruptGuards,
       getActiveTurnIdForThread,
+      getThreadProviderProfileId,
       hasEstablishedThreadItems,
       pendingInterruptsRef,
       activeThreadId,

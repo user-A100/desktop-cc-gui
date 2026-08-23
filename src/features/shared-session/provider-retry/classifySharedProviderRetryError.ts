@@ -58,6 +58,12 @@ function normalizeMessage(value: string | null | undefined): string {
 
 function classifyPermanent(text: string): SharedProviderRetryClassification | null {
   if (
+    /invalid_request_error/.test(text) &&
+    /required reasoning item/.test(text)
+  ) {
+    return { disposition: "permanent", kind: "config", reason: "配置错误" };
+  }
+  if (
     /unknown model|model not found|missing[- ]?key|missing api key|no api key|api key (?:is )?(?:missing|not (?:set|configured))/.test(
       text,
     ) ||

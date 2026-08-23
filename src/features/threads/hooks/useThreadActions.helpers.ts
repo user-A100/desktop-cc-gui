@@ -23,6 +23,11 @@ import { remapThreadParentsToSharedOwners } from "../../shared-session/runtime/s
 import { sharedHideIdentityIntersects } from "../../shared-session/runtime/sharedHideIdentity";
 import { resolveMergedThreadCreatedAt } from "../utils/threadSummarySort";
 import {
+  canonicalQoderProviderProfileId,
+  canonicalQoderThreadId,
+  collectQoderSessionIdentityKeys,
+} from "../utils/qoderSessionIdentity";
+import {
   shouldHidePlaceholderNativeDraftFromSidebar,
   stripEmptyClaudeIndexFallbackSummaries,
 } from "./sessionIndexThreadSummaries";
@@ -74,6 +79,11 @@ export type GeminiSessionSummary = {
 
 // Kimi session summaries share the Gemini summary shape (id/message/updatedAt/size).
 export type KimiSessionSummary = GeminiSessionSummary;
+
+export type QoderSessionSummary = KimiSessionSummary & {
+  providerProfileId: string;
+  providerProfileName?: string | null;
+};
 
 export type DshSessionSummary = GeminiSessionSummary & {
   agentPreset?: string | null;
@@ -132,6 +142,10 @@ export function buildHiddenAutomaticSessionIdSet(
     if (!trimmed) {
       continue;
     }
+    if (trimmed.toLowerCase().startsWith("qoder:")) {
+      collectQoderSessionIdentityKeys(trimmed).forEach((id) => set.add(id));
+      continue;
+    }
     set.add(trimmed);
     const parts = trimmed.split(":").filter(Boolean);
     if (parts.length === 0) {
@@ -161,6 +175,11 @@ export function threadIdMatchesHiddenAutomaticSessionSet(
   }
   if (hiddenIds.has(trimmed)) {
     return true;
+  }
+  if (trimmed.toLowerCase().startsWith("qoder:")) {
+    return collectQoderSessionIdentityKeys(trimmed).some((id) =>
+      hiddenIds.has(id),
+    );
   }
   const parts = trimmed.split(":").filter(Boolean);
   if (parts.length === 0) {
@@ -1211,8 +1230,37 @@ export function normalizePiSessionSummaries(
 
 export function normalizeQoderSessionSummaries(
   value: unknown,
-): KimiSessionSummary[] {
-  return normalizeGeminiSessionSummaries(value);
+  fallbackProviderProfileId?: string | null,
+): QoderSessionSummary[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const sessions: QoderSessionSummary[] = [];
+  value.forEach((entry) => {
+    const base = normalizeGeminiSessionSummary(entry);
+    if (!base || !entry || typeof entry !== "object") {
+      return;
+    }
+    const record = entry as Record<string, unknown>;
+    const recordedProviderProfileId = asString(
+      record.providerProfileId ?? record.provider_profile_id,
+    ).trim();
+    const providerProfileId = canonicalQoderProviderProfileId(
+      recordedProviderProfileId || fallbackProviderProfileId,
+    );
+    if (!providerProfileId) {
+      return;
+    }
+    const providerProfileName = asString(
+      record.providerProfileName ?? record.provider_profile_name,
+    ).trim();
+    sessions.push({
+      ...base,
+      providerProfileId,
+      ...(providerProfileName ? { providerProfileName } : {}),
+    });
+  });
+  return sessions;
 }
 
 function normalizeDshSessionSummary(value: unknown): DshSessionSummary | null {
@@ -1451,6 +1499,8 @@ function mergeNativeCliSessionSummaries(params: {
       parentSessionId?: string | null;
       sessionKind?: string | null;
       agentPreset?: string | null;
+      providerProfileId?: string | null;
+      providerProfileName?: string | null;
     }
   >;
   idPrefix: "gemini" | "grok" | "kimi" | "pi" | "dsh" | "qoder";
@@ -1485,7 +1535,13 @@ function mergeNativeCliSessionSummaries(params: {
   const mergedById = new Map<string, ThreadSummary>();
   baseSummaries.forEach((entry) => mergedById.set(entry.id, entry));
   sessions.forEach((session) => {
-    const id = `${idPrefix}:${session.sessionId}`;
+    const id =
+      engineSource === "qoder"
+        ? canonicalQoderThreadId(session.sessionId, session.providerProfileId)
+        : `${idPrefix}:${session.sessionId}`;
+    if (!id) {
+      return;
+    }
     // id 本体 + bare uuid（与 Codex catalog 路径对齐，避免 hide set 变体漏网）
     if (
       threadIdInHiddenSharedBindingSet(
@@ -1538,9 +1594,11 @@ function mergeNativeCliSessionSummaries(params: {
     const rawParent = session.parentSessionId?.trim() || "";
     const parentThreadId =
       rawParent.length > 0
-        ? rawParent.startsWith(`${idPrefix}:`)
-          ? rawParent
-          : `${idPrefix}:${rawParent}`
+        ? engineSource === "qoder"
+          ? canonicalQoderThreadId(rawParent, session.providerProfileId)
+          : rawParent.startsWith(`${idPrefix}:`)
+            ? rawParent
+            : `${idPrefix}:${rawParent}`
         : prev?.parentThreadId ?? null;
     const next: ThreadSummary = {
       id,
@@ -1557,6 +1615,14 @@ function mergeNativeCliSessionSummaries(params: {
       ...(parentThreadId ? { parentThreadId } : {}),
       ...(typeof session.agentPreset === "string" && session.agentPreset.trim()
         ? { dshAgentPreset: session.agentPreset.trim() }
+        : {}),
+      ...(engineSource === "qoder" && session.providerProfileId
+        ? {
+            providerProfileId: session.providerProfileId,
+            ...(session.providerProfileName
+              ? { providerProfileName: session.providerProfileName }
+              : {}),
+          }
         : {}),
     };
     if (
@@ -1578,6 +1644,14 @@ function mergeNativeCliSessionSummaries(params: {
           next.parentThreadId ?? merged.parentThreadId ?? prev?.parentThreadId ?? null,
         dshAgentPreset:
           next.dshAgentPreset ?? merged.dshAgentPreset ?? prev?.dshAgentPreset,
+        providerProfileId:
+          next.providerProfileId ??
+          merged.providerProfileId ??
+          prev?.providerProfileId,
+        providerProfileName:
+          next.providerProfileName ??
+          merged.providerProfileName ??
+          prev?.providerProfileName,
       });
     } else if (
       (parentThreadId && !prev.parentThreadId) ||
@@ -1588,6 +1662,12 @@ function mergeNativeCliSessionSummaries(params: {
         ...prev,
         ...(parentThreadId ? { parentThreadId } : {}),
         ...(next.dshAgentPreset ? { dshAgentPreset: next.dshAgentPreset } : {}),
+        ...(next.providerProfileId
+          ? { providerProfileId: next.providerProfileId }
+          : {}),
+        ...(next.providerProfileName
+          ? { providerProfileName: next.providerProfileName }
+          : {}),
       });
     }
   });
@@ -1663,7 +1743,7 @@ export function mergePiSessionSummaries(
 
 export function mergeQoderSessionSummaries(
   baseSummaries: ThreadSummary[],
-  qoderSessions: KimiSessionSummary[],
+  qoderSessions: QoderSessionSummary[],
   workspaceId: string,
   mappedTitles: Record<string, string>,
   getCustomName: (workspaceId: string, threadId: string) => string | undefined,
@@ -1859,9 +1939,11 @@ export function mergeCodexCatalogSessionSummaries(
     // Live catalog still emits them from session_meta-only files; skip so
     // hydration cannot resurrect the same pups.
     if (
+      !isProviderContinuation &&
       !nativeTitle &&
       !customTitle &&
       !mappedTitle &&
+      !isCollabWorkerAgentNumberTitle(title) &&
       shouldHidePlaceholderNativeDraftFromSidebar({
         engine: engineSource,
         threadId: session.sessionId,

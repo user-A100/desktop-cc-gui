@@ -145,7 +145,109 @@ pub(crate) fn open_connection() -> Result<Connection, String> {
            updated_ms INTEGER NOT NULL
          );",
     );
+    migrate_legacy_qoder_session_identities(&connection)?;
     Ok(connection)
+}
+
+/// Session Index historically keyed Qoder rows by raw ACP id. Global and CN
+/// may legitimately produce the same raw id, so upgrade old rows in place to
+/// the profile-qualified identity before any list or writer can observe them.
+/// The vendor history files remain untouched.
+fn migrate_legacy_qoder_session_identities(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT session_id, provider_profile_id, tombstoned_at
+             FROM session_index
+             WHERE engine = 'qoder'",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    for (legacy_id, provider_profile_id, tombstoned_at) in rows {
+        let identity =
+            match crate::engine::qoder_provider_profile::parse_qoder_native_session_identity(
+                &legacy_id,
+                provider_profile_id.as_deref(),
+            ) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    log::warn!(
+                    "[session-index] retained malformed Qoder identity `{}` during migration: {}",
+                    legacy_id,
+                    error
+                );
+                    continue;
+                }
+            };
+        let canonical_id = identity.canonical_id();
+        let canonical_provider_profile_id = identity.provider_profile_id;
+        if canonical_id == legacy_id {
+            tx.execute(
+                "UPDATE session_index SET provider_profile_id = ?1
+                 WHERE engine = 'qoder' AND session_id = ?2",
+                params![canonical_provider_profile_id, legacy_id],
+            )
+            .map_err(|error| error.to_string())?;
+            continue;
+        }
+        let canonical_exists = tx
+            .query_row(
+                "SELECT 1 FROM session_index WHERE engine = 'qoder' AND session_id = ?1",
+                [&canonical_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .is_some();
+        if canonical_exists {
+            if let Some(tombstoned_at) = tombstoned_at {
+                tx.execute(
+                    "UPDATE session_index
+                     SET tombstoned_at = COALESCE(tombstoned_at, ?1),
+                         provider_profile_id = ?2
+                     WHERE engine = 'qoder' AND session_id = ?3",
+                    params![tombstoned_at, canonical_provider_profile_id, canonical_id],
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                tx.execute(
+                    "UPDATE session_index SET provider_profile_id = ?1
+                     WHERE engine = 'qoder' AND session_id = ?2",
+                    params![canonical_provider_profile_id, canonical_id],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            tx.execute(
+                "DELETE FROM session_index WHERE engine = 'qoder' AND session_id = ?1",
+                [&legacy_id],
+            )
+            .map_err(|error| error.to_string())?;
+        } else {
+            tx.execute(
+                "UPDATE session_index SET session_id = ?1, provider_profile_id = ?2
+                 WHERE engine = 'qoder' AND session_id = ?3",
+                params![canonical_id, canonical_provider_profile_id, legacy_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    tx.commit().map_err(|error| error.to_string())
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -254,7 +356,29 @@ pub(crate) fn upsert_rows(
             .map_err(|error| error.to_string())?;
         for row in rows {
             let engine = row.engine.trim().to_ascii_lowercase();
-            let session_id = row.session_id.trim();
+            let qoder_identity = (engine == "qoder")
+                .then(|| {
+                    crate::engine::qoder_provider_profile::parse_qoder_native_session_identity(
+                        &row.session_id,
+                        row.provider_profile_id.as_deref(),
+                    )
+                })
+                .transpose()?;
+            let qoder_session_id = qoder_identity.as_ref().map(
+                crate::engine::qoder_provider_profile::QoderNativeSessionIdentity::canonical_id,
+            );
+            let session_id = qoder_session_id
+                .as_deref()
+                .unwrap_or_else(|| row.session_id.trim());
+            let provider_profile_id = qoder_identity
+                .as_ref()
+                .map(|identity| identity.provider_profile_id)
+                .or_else(|| {
+                    row.provider_profile_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                });
             if engine.is_empty() || session_id.is_empty() {
                 continue;
             }
@@ -301,10 +425,7 @@ pub(crate) fn upsert_rows(
                         .map(str::trim)
                         .filter(|value| !value.is_empty()),
                     row.size_bytes.map(|value| value as i64),
-                    row.provider_profile_id
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty()),
+                    provider_profile_id,
                     row.provider_profile_name
                         .as_deref()
                         .map(str::trim)
@@ -812,9 +933,35 @@ pub(crate) fn tombstone_session_ids(
              ON CONFLICT(engine, session_id) DO NOTHING",
         )
         .map_err(|error| error.to_string())?;
+    let mut qoder_statement = connection
+        .prepare(
+            "UPDATE session_index
+             SET tombstoned_at = COALESCE(tombstoned_at, ?1)
+             WHERE engine = 'qoder' AND (session_id = ?2 OR session_id = ?3)",
+        )
+        .map_err(|error| error.to_string())?;
     for raw in session_ids {
         let full = raw.trim();
         if full.is_empty() {
+            continue;
+        }
+        if full.starts_with(crate::engine::qoder_provider_profile::QODER_NATIVE_SESSION_PREFIX) {
+            let identity =
+                crate::engine::qoder_provider_profile::parse_qoder_native_session_identity(
+                    full, None,
+                )?;
+            let canonical_id = identity.canonical_id();
+            let legacy_raw_id = if identity.is_legacy {
+                identity.raw_session_id
+            } else {
+                String::new()
+            };
+            updated += qoder_statement
+                .execute(params![marked_at, canonical_id, legacy_raw_id])
+                .map_err(|error| error.to_string())? as usize;
+            marker
+                .execute(params!["qoder", canonical_id, marked_at])
+                .map_err(|error| error.to_string())?;
             continue;
         }
         let engine_hint = full
@@ -880,7 +1027,16 @@ pub(crate) fn tombstone_engine_sessions(
         .map_err(|error| error.to_string())?;
     for (engine, session_id) in pairs {
         let engine = engine.trim().to_ascii_lowercase();
-        let session_id = session_id.trim();
+        let qoder_session_id = (engine == "qoder")
+            .then(|| {
+                crate::engine::qoder_provider_profile::canonical_qoder_native_session_id(
+                    session_id, None,
+                )
+            })
+            .transpose()?;
+        let session_id = qoder_session_id
+            .as_deref()
+            .unwrap_or_else(|| session_id.trim());
         if engine.is_empty() || session_id.is_empty() {
             continue;
         }
@@ -910,7 +1066,16 @@ pub(crate) fn delete_engine_session_rows(
         .map_err(|error| error.to_string())?;
     for (engine, session_id) in pairs {
         let engine = engine.trim().to_ascii_lowercase();
-        let session_id = session_id.trim();
+        let qoder_session_id = (engine == "qoder")
+            .then(|| {
+                crate::engine::qoder_provider_profile::canonical_qoder_native_session_id(
+                    session_id, None,
+                )
+            })
+            .transpose()?;
+        let session_id = qoder_session_id
+            .as_deref()
+            .unwrap_or_else(|| session_id.trim());
         if engine.is_empty() || session_id.is_empty() {
             continue;
         }
@@ -1354,6 +1519,93 @@ mod tests {
             listed.is_empty(),
             "tombstoned PI rows must leave the sidebar page"
         );
+    }
+
+    #[test]
+    fn qoder_same_raw_id_keeps_global_and_cn_rows_isolated() {
+        let connection = Connection::open_in_memory().expect("open");
+        connection.execute_batch(DDL).expect("ddl");
+        let mut global = index_row("qoder", "same-qoder-session", 200);
+        global.provider_profile_id = Some("__qoder_global__".into());
+        global.provider_profile_name = Some("Qoder Global".into());
+        let mut cn = index_row("qoder", "same-qoder-session", 201);
+        cn.provider_profile_id = Some("__qoder_cn__".into());
+        cn.provider_profile_name = Some("Qoder CN".into());
+
+        upsert_rows(&connection, &[global, cn]).expect("upsert both distributions");
+        let rows = list_for_workspace_path(&connection, "/tmp/proj", 10).expect("list");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| {
+            row.session_id == "qoder:__qoder_global__:same-qoder-session"
+                && row.provider_profile_id.as_deref() == Some("__qoder_global__")
+        }));
+        assert!(rows.iter().any(|row| {
+            row.session_id == "qoder:__qoder_cn__:same-qoder-session"
+                && row.provider_profile_id.as_deref() == Some("__qoder_cn__")
+        }));
+
+        let updated = tombstone_session_ids(
+            &connection,
+            &["qoder:__qoder_global__:same-qoder-session".into()],
+        )
+        .expect("tombstone Global only");
+        assert_eq!(updated, 1);
+        let remaining = list_for_workspace_path(&connection, "/tmp/proj", 10).expect("list");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].session_id,
+            "qoder:__qoder_cn__:same-qoder-session"
+        );
+    }
+
+    #[test]
+    fn qoder_legacy_row_migrates_using_its_durable_cn_owner() {
+        let connection = Connection::open_in_memory().expect("open");
+        connection.execute_batch(DDL).expect("ddl");
+        connection
+            .execute(
+                "INSERT INTO session_index (
+                    engine, session_id, title, updated_at, indexed_at, provider_profile_id
+                 ) VALUES ('qoder', 'legacy-qoder-session', 'Legacy', 1, 1, '__qoder_cn__')",
+                [],
+            )
+            .expect("seed legacy CN row");
+
+        migrate_legacy_qoder_session_identities(&connection).expect("migrate legacy row");
+        let session_id: String = connection
+            .query_row(
+                "SELECT session_id FROM session_index WHERE engine = 'qoder'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated row");
+        assert_eq!(session_id, "qoder:__qoder_cn__:legacy-qoder-session");
+        let provider_profile_id: String = connection
+            .query_row(
+                "SELECT provider_profile_id FROM session_index WHERE engine = 'qoder'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated profile");
+        assert_eq!(provider_profile_id, "__qoder_cn__");
+    }
+
+    #[test]
+    fn qoder_upsert_makes_legacy_global_owner_explicit() {
+        let connection = Connection::open_in_memory().expect("open");
+        connection.execute_batch(DDL).expect("ddl");
+        let row = index_row("qoder", "legacy-global-session", 1);
+
+        upsert_rows(&connection, &[row]).expect("upsert legacy Global row");
+        let (session_id, provider_profile_id): (String, String) = connection
+            .query_row(
+                "SELECT session_id, provider_profile_id FROM session_index WHERE engine = 'qoder'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read canonical Qoder row");
+        assert_eq!(session_id, "qoder:__qoder_global__:legacy-global-session");
+        assert_eq!(provider_profile_id, "__qoder_global__");
     }
 
     #[test]

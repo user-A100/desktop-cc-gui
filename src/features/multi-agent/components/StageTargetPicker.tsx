@@ -1,34 +1,31 @@
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 
+import type { EngineType } from "../../../types";
 import type { ExecutionTarget } from "../../shared-session/target/types";
 import { resolveAtomicReasoningOptions } from "../../models/atomicModelReasoning";
+import type { ProviderTargetGroup } from "../../composer/components/ChatInputBox/hooks/useProviderTargetCatalogOwners";
 import { ModelSelect } from "../../composer/components/ChatInputBox/selectors/ModelSelect";
 import { ReasoningSelect } from "../../composer/components/ChatInputBox/selectors/ReasoningSelect";
-import { useAtomicProviderTargetCatalog } from "../../composer/components/ChatInputBox/hooks/useProviderTargetCatalogOwners";
-import type { ReasoningEffort } from "../../composer/components/ChatInputBox/types";
-import {
-  CLAUDE_LOCAL_PROVIDER_PROFILE_ID,
-  CODEX_DISK_PROVIDER_PROFILE_ID,
-  GROK_LOCAL_PROVIDER_PROFILE_ID,
-  KIMI_LOCAL_PROVIDER_PROFILE_ID,
-  OPENCODE_LOCAL_PROVIDER_PROFILE_ID,
-  PI_LOCAL_PROVIDER_PROFILE_ID,
-  QODER_LOCAL_PROVIDER_PROFILE_ID,
-} from "../../threads/constants/codexProviderProfiles";
+import type { ModelInfo, ReasoningEffort } from "../../composer/components/ChatInputBox/types";
 import type { AgentExecutionTarget } from "../types";
 
-const LOCAL_PROFILE: Record<string, string> = {
-  claude: CLAUDE_LOCAL_PROVIDER_PROFILE_ID,
-  codex: CODEX_DISK_PROVIDER_PROFILE_ID,
-  kimi: KIMI_LOCAL_PROVIDER_PROFILE_ID,
-  grok: GROK_LOCAL_PROVIDER_PROFILE_ID,
-  opencode: OPENCODE_LOCAL_PROVIDER_PROFILE_ID,
-  pi: PI_LOCAL_PROVIDER_PROFILE_ID,
-  qoder: QODER_LOCAL_PROVIDER_PROFILE_ID,
+export type StageTargetCatalog = {
+  groups: ProviderTargetGroup[];
+  ensureProfiles: () => Promise<void> | void;
+  ensureModels: (
+    engine: EngineType,
+    providerProfileId: string,
+  ) => Promise<ModelInfo[] | void> | ModelInfo[] | void;
+  reloadConfig: (
+    engine: EngineType,
+    providerProfileId: string,
+  ) => Promise<void> | void;
+  profileLoadError: string | null;
 };
 
 type StageTargetPickerProps = {
   value: AgentExecutionTarget;
+  catalog: StageTargetCatalog;
   disabled?: boolean;
   onChange: (next: AgentExecutionTarget) => void;
 };
@@ -67,40 +64,25 @@ function fromExecutionTarget(
 }
 
 /**
- * 模板编辑器用：复用对话内 ModelSelect + ReasoningSelect，
- * 选项随引擎/模型动态变化，不写死 low/medium/high。
+ * 模板编辑器用：与 PromptEnhancerDialog 同一套 ModelSelect + ReasoningSelect。
+ * catalog 由弹层单例注入，禁止每段自挂 useAtomicProviderTargetCatalog。
+ * 模型列表只在打开菜单时拉取（onOpenTargetCatalog / onOpenProviderProfile）。
  */
 export function StageTargetPicker({
   value,
+  catalog,
   disabled,
   onChange,
 }: StageTargetPickerProps) {
   const providerId = (
-    ["claude", "codex", "kimi", "grok", "opencode", "pi"].includes(value.engine)
+    ["claude", "codex", "kimi", "grok", "opencode", "pi", "qoder"].includes(
+      value.engine,
+    )
       ? value.engine
       : "claude"
-  ) as "claude" | "codex" | "kimi" | "grok" | "opencode" | "pi";
+  ) as "claude" | "codex" | "kimi" | "grok" | "opencode" | "pi" | "qoder";
 
-  const catalog = useAtomicProviderTargetCatalog({
-    enabled: true,
-    mode: "shared",
-    currentProvider: providerId,
-    currentProviderProfileId: value.providerProfileId ?? null,
-    resolveProviderLabel: (id) => id,
-    kimiDisabledReason: "",
-  });
   const executionTarget = useMemo(() => toExecutionTarget(value), [value]);
-
-  useEffect(() => {
-    void catalog.ensureProfiles();
-  }, [catalog.ensureProfiles]);
-
-  useEffect(() => {
-    const profileId =
-      value.providerProfileId?.trim() || LOCAL_PROFILE[providerId] || "";
-    if (!profileId) return;
-    void catalog.ensureModels(providerId, profileId);
-  }, [catalog.ensureModels, providerId, value.providerProfileId]);
 
   const reasoningOptions = useMemo(() => {
     return resolveAtomicReasoningOptions(value.engine, {
@@ -110,9 +92,7 @@ export function StageTargetPicker({
   }, [value.engine, value.model, value.modelCatalogEntryId]);
 
   const modelValue =
-    value.modelCatalogEntryId?.trim() ||
-    value.model?.trim() ||
-    "";
+    value.modelCatalogEntryId?.trim() || value.model?.trim() || "";
 
   return (
     <div
@@ -140,6 +120,7 @@ export function StageTargetPicker({
         }
         targetCatalogError={catalog.profileLoadError}
         triggerVariant="default"
+        menuLayer="overlay"
       />
       {reasoningOptions.length > 0 ? (
         <ReasoningSelect

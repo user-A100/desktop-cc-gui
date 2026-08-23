@@ -242,6 +242,9 @@ const defaultSettings: AppSettings = {
   kimiBin: null,
   piBin: null,
   qoderBin: null,
+  qoderConfigDir: null,
+  qoderCnBin: null,
+  qoderCnConfigDir: null,
   grokBin: null,
   opencodeBin: null,
   dshBin: null,
@@ -437,6 +440,13 @@ function normalizeAppSettings(
     kimiBin: settings.kimiBin?.trim() ? settings.kimiBin.trim() : null,
     piBin: settings.piBin?.trim() ? settings.piBin.trim() : null,
     qoderBin: settings.qoderBin?.trim() ? settings.qoderBin.trim() : null,
+    qoderConfigDir: settings.qoderConfigDir?.trim()
+      ? settings.qoderConfigDir.trim()
+      : null,
+    qoderCnBin: settings.qoderCnBin?.trim() ? settings.qoderCnBin.trim() : null,
+    qoderCnConfigDir: settings.qoderCnConfigDir?.trim()
+      ? settings.qoderCnConfigDir.trim()
+      : null,
     grokBin: settings.grokBin?.trim() ? settings.grokBin.trim() : null,
     opencodeBin: settings.opencodeBin?.trim()
       ? settings.opencodeBin.trim()
@@ -785,8 +795,11 @@ export function useAppSettings() {
     return runPiDoctor(piBin);
   }, []);
 
-  const qoderDoctor = useCallback(async (qoderBin: string | null) => {
-    return runQoderDoctor(qoderBin);
+  const qoderDoctor = useCallback(async (
+    qoderBin: string | null,
+    providerProfileId?: string | null,
+  ) => {
+    return runQoderDoctor(qoderBin, providerProfileId);
   }, []);
 
   return {

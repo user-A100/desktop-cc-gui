@@ -17,6 +17,7 @@ use super::kimi::KimiSession;
 use super::opencode::OpenCodeSession;
 use super::pi::PiSession;
 use super::qoder::QoderSession;
+use super::qoder_provider_profile::{QoderDistributionSettings, QoderProviderLaunchProfile};
 use super::status::{
     detect_all_engines, detect_claude_status, detect_codex_status, detect_grok_status,
     detect_kimi_status, detect_opencode_status, detect_pi_status,
@@ -55,6 +56,11 @@ pub struct EngineManager {
 
     /// Qoder sessions per workspace/provider runtime.
     qoder_sessions: Mutex<HashMap<String, QoderSessionEntry>>,
+
+    /// Qoder is one engine with two immutable distribution identities. Keep
+    /// their launch settings beside the manager so history/index paths that
+    /// only receive an EngineManager do not silently collapse to Global.
+    qoder_distribution_settings: RwLock<QoderDistributionSettings>,
 
     /// Engine configurations
     engine_configs: RwLock<HashMap<EngineType, EngineConfig>>,
@@ -126,13 +132,17 @@ fn pi_engine_config_with_home(
     config
 }
 
-fn qoder_engine_config_with_home(
+fn qoder_engine_config_with_launch_profile(
     mut config: Option<EngineConfig>,
-    home_dir: Option<&Path>,
+    launch_profile: &QoderProviderLaunchProfile,
 ) -> Option<EngineConfig> {
-    if let Some(home_dir) = home_dir {
-        config.get_or_insert_with(EngineConfig::default).home_dir =
-            Some(home_dir.to_string_lossy().to_string());
+    {
+        let config_ref = config.get_or_insert_with(EngineConfig::default);
+        config_ref.bin_path = launch_profile.bin_path.clone();
+        config_ref.home_dir = launch_profile
+            .home_dir
+            .as_ref()
+            .map(|home_dir| home_dir.to_string_lossy().to_string());
     }
     config
 }
@@ -152,6 +162,7 @@ impl EngineManager {
             grok_sessions: Mutex::new(HashMap::new()),
             pi_sessions: Mutex::new(HashMap::new()),
             qoder_sessions: Mutex::new(HashMap::new()),
+            qoder_distribution_settings: RwLock::new(QoderDistributionSettings::default()),
             engine_configs: RwLock::new(HashMap::new()),
         }
     }
@@ -370,6 +381,17 @@ impl EngineManager {
     pub async fn get_engine_config(&self, engine_type: EngineType) -> Option<EngineConfig> {
         let configs = self.engine_configs.read().await;
         configs.get(&engine_type).cloned()
+    }
+
+    pub(crate) async fn set_qoder_distribution_settings(
+        &self,
+        settings: QoderDistributionSettings,
+    ) {
+        *self.qoder_distribution_settings.write().await = settings;
+    }
+
+    pub(crate) async fn qoder_distribution_settings(&self) -> QoderDistributionSettings {
+        self.qoder_distribution_settings.read().await.clone()
     }
 
     // ==================== Claude Session Management ====================
@@ -899,30 +921,30 @@ impl EngineManager {
         &self,
         workspace_id: &str,
         workspace_path: &Path,
-        runtime_key: &str,
-        home_dir: Option<&Path>,
+        launch_profile: &QoderProviderLaunchProfile,
     ) -> Arc<QoderSession> {
         {
             let sessions = self.qoder_sessions.lock().await;
-            if let Some(entry) = sessions.get(runtime_key) {
+            if let Some(entry) = sessions.get(&launch_profile.runtime_key) {
                 return entry.session.clone();
             }
         }
-        let config = qoder_engine_config_with_home(
+        let config = qoder_engine_config_with_launch_profile(
             self.get_engine_config(EngineType::Qoder).await,
-            home_dir,
+            launch_profile,
         );
-        let session = Arc::new(QoderSession::new(
+        let session = Arc::new(QoderSession::new_with_distribution(
             workspace_id.to_string(),
             workspace_path.to_path_buf(),
             config,
+            launch_profile.distribution,
         ));
         let mut sessions = self.qoder_sessions.lock().await;
-        if let Some(entry) = sessions.get(runtime_key) {
+        if let Some(entry) = sessions.get(&launch_profile.runtime_key) {
             return entry.session.clone();
         }
         sessions.insert(
-            runtime_key.to_string(),
+            launch_profile.runtime_key.clone(),
             QoderSessionEntry {
                 workspace_id: workspace_id.to_string(),
                 session: session.clone(),
@@ -984,6 +1006,28 @@ impl EngineManager {
                 errors.len(),
                 errors.join("; ")
             ))
+        }
+    }
+
+    /// Interrupt only one Qoder distribution runtime. `provider_profile_id`
+    /// may be legacy/empty (which resolves to Global), but never falls through
+    /// to the sibling CN/Global session.
+    pub async fn interrupt_qoder_session_for_profile(
+        &self,
+        workspace_id: &str,
+        provider_profile_id: Option<&str>,
+        turn_id: Option<&str>,
+    ) -> Result<(), String> {
+        let runtime_key = crate::engine::qoder_provider_profile::qoder_runtime_key(
+            workspace_id,
+            provider_profile_id,
+        )?;
+        let Some(session) = self.get_qoder_session_for_runtime(&runtime_key).await else {
+            return Ok(());
+        };
+        match turn_id {
+            Some(turn_id) => session.interrupt_turn(turn_id).await,
+            None => session.interrupt().await,
         }
     }
 

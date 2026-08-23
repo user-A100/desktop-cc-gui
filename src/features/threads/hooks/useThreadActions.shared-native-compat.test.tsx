@@ -45,6 +45,7 @@ vi.mock("../../../services/tauri", () => ({
   listDshSessions: vi.fn(),
   listPiSessions: vi.fn(),
   listGrokSessions: vi.fn(),
+  listQoderSessions: vi.fn(async () => []),
   listSessionIndexForWorkspace: vi.fn(async () => ({
     data: [],
     source: "session-index",
@@ -58,6 +59,7 @@ vi.mock("../../../services/tauri", () => ({
   loadCodexSession: vi.fn(),
   loadGeminiSession: vi.fn(),
   readWorkspaceFile: vi.fn(),
+  rememberSessionIndexWorkspacePath: vi.fn(),
   renameThreadTitleKey: vi.fn(),
   resumeThread: vi.fn(),
   setThreadTitle: vi.fn(),

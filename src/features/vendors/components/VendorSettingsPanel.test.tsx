@@ -254,6 +254,8 @@ function renderPanel(
     codexReloadStatus?: "idle" | "reloading" | "applied" | "failed";
     codexReloadMessage?: string | null;
     onUpdateAppSettings?: (next: AppSettings) => Promise<void>;
+    initialCli?: "qoder";
+    initialQoderDistribution?: "global" | "cn";
   } = {},
 ) {
   const handleReloadCodexRuntimeConfig =
@@ -273,6 +275,8 @@ function renderPanel(
       codexReloadMessage={options.codexReloadMessage ?? null}
       handleReloadCodexRuntimeConfig={handleReloadCodexRuntimeConfig}
       onUpdateAppSettings={onUpdateAppSettings}
+      initialCli={options.initialCli}
+      initialQoderDistribution={options.initialQoderDistribution}
     />,
   );
 
@@ -586,7 +590,7 @@ describe("VendorSettingsPanel", () => {
     ).toBeTruthy();
   });
 
-  it("renders the Qoder CLI tab with lifecycle and custom path instead of coming-soon", async () => {
+  it("renders Qoder Global as the default tab under one Qoder CLI tab", async () => {
     renderPanel();
 
     await waitFor(() => {
@@ -609,8 +613,83 @@ describe("VendorSettingsPanel", () => {
     expect(screen.queryByTestId("provider-list-stub")).toBeNull();
     expect(screen.queryByTestId("kimi-provider-list-stub")).toBeNull();
     expect(
-      screen.getByRole("button", { name: /自定义路径|Custom path|Configure/i }),
-    ).toBeTruthy();
+      screen.getByRole("tab", { name: "Qoder Global" }).getAttribute(
+        "aria-selected",
+      ),
+    ).toBe("true");
+    expect(
+      screen.getByRole("tab", { name: "Qoder CN" }).getAttribute(
+        "aria-selected",
+      ),
+    ).toBe("false");
+    expect(screen.getByText(/QODER_CONFIG_DIR/)).toBeTruthy();
+    expect(
+      screen.getAllByRole("button", {
+        name: /自定义路径|Custom path|Configure/i,
+      }),
+    ).toHaveLength(1);
+    expect(screen.getByPlaceholderText("~/.qoder")).toBeTruthy();
+    expect(screen.queryByPlaceholderText("~/.qoder-cn")).toBeNull();
+  });
+
+  it("opens the Qoder CN tab from a Qoder settings deep link", async () => {
+    renderPanel({ initialCli: "qoder", initialQoderDistribution: "cn" });
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Qoder CLI" })).toBeTruthy();
+    });
+    expect(
+      screen.getByRole("tab", { name: "Qoder CN" }).getAttribute(
+        "aria-selected",
+      ),
+    ).toBe("true");
+    expect(screen.getByPlaceholderText("~/.qoder-cn")).toBeTruthy();
+    expect(screen.queryByPlaceholderText("~/.qoder")).toBeNull();
+  });
+
+  it("saves Qoder Global/CN config roots independently", async () => {
+    const { onUpdateAppSettings } = renderPanel({
+      appSettings: {
+        qoderConfigDir: "/existing/global",
+        qoderCnConfigDir: "/existing/cn",
+      },
+    });
+
+    await waitFor(() => {
+      expect(readGlobalCodexConfigTomlMock).toHaveBeenCalled();
+      expect(readGlobalCodexAuthJsonMock).toHaveBeenCalled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Qoder CLI/ }));
+
+    const globalInput = screen.getByDisplayValue("/existing/global");
+    fireEvent.change(globalInput, { target: { value: "/next/global" } });
+    fireEvent.submit(globalInput.closest("form")!);
+    await waitFor(() =>
+      expect(onUpdateAppSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          qoderConfigDir: "/next/global",
+          qoderCnConfigDir: "/existing/cn",
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Qoder CN" }));
+    expect(
+      screen.getByRole("tab", { name: "Qoder CN" }).getAttribute(
+        "aria-selected",
+      ),
+    ).toBe("true");
+    const cnInput = screen.getByDisplayValue("/existing/cn");
+    fireEvent.change(cnInput, { target: { value: "/next/cn" } });
+    fireEvent.submit(cnInput.closest("form")!);
+    await waitFor(() =>
+      expect(onUpdateAppSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          qoderConfigDir: "/existing/global",
+          qoderCnConfigDir: "/next/cn",
+        }),
+      ),
+    );
   });
 
   it("renders the Grok CLI tab with official config row and provider list", async () => {

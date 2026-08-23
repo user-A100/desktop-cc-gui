@@ -5,6 +5,7 @@ import {
   buildNativeIndexEarlyPaintSummaries,
   projectNativeIndexRowsToSummaries,
   selectNativeSessionIndexRows,
+  shouldDeferNativeIndexRowUntilHideReady,
   shouldRememberHideUnreadiness,
 } from "./useThreadActions.nativeIndexProjection";
 
@@ -234,5 +235,47 @@ describe("native Session Index projection", () => {
       ],
     });
     expect(painted.map((row) => row.id).sort()).toEqual(["nick-1", "user-1"]);
+  });
+
+  it("unreadiness defers new grok/pi/qoder rows but keeps last-good and claude", () => {
+    const lastGoodGrok = {
+      id: "grok:keep",
+      name: "已有 Grok",
+      createdAt: 20,
+      updatedAt: 20,
+      engineSource: "grok",
+    } as ThreadSummary;
+    const painted = buildNativeIndexEarlyPaintSummaries({
+      rows: [
+        { ...indexRow("claude", "new-claude"), updatedAt: 40 },
+        { ...indexRow("grok", "new-grok"), updatedAt: 41 },
+        { ...indexRow("pi", "new-pi"), updatedAt: 42 },
+        {
+          engine: "qoder",
+          sessionId: "__qoder_global__:new-qoder",
+          title: "你好 kk",
+          updatedAt: 43,
+        },
+        { ...indexRow("grok", "keep"), updatedAt: 20 },
+      ],
+      workspaceId: "ws-1",
+      getCustomName: () => undefined,
+      hideSet: new Set(),
+      currentThreads: undefined,
+      lastGood: [lastGoodGrok],
+      hideReady: false,
+    });
+    const ids = painted.map((row) => row.id).sort();
+    expect(ids).toContain("claude:new-claude");
+    expect(ids).toContain("grok:keep");
+    expect(ids).not.toContain("grok:new-grok");
+    expect(ids).not.toContain("pi:new-pi");
+    expect(ids.some((id) => id.includes("new-qoder"))).toBe(false);
+    expect(
+      shouldDeferNativeIndexRowUntilHideReady(
+        { id: "grok:new-grok", engineSource: "grok" },
+        { hideReady: false, keepIds: new Set(["grok:keep"]) },
+      ),
+    ).toBe(true);
   });
 });

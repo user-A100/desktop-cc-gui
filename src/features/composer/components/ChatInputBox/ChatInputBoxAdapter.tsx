@@ -42,6 +42,7 @@ import type { CustomCommandOption, CustomPromptOption } from '../../../../types'
 import type { EngineType } from '../../../../types';
 import type { RateLimitSnapshot } from '../../../../types';
 import type { ComposerSendReadiness } from '../../utils/composerSendReadiness';
+import type { QoderSettingsHighlightTarget } from '../../../app/hooks/useSettingsModalState';
 import { formatEngineVersionLabel } from '../../../engine/utils/engineLabels';
 import { projectMemoryFacade } from '../../../project-memory/services/projectMemoryFacade';
 import { noteCardsFacade } from '../../../note-cards/services/noteCardsFacade';
@@ -564,7 +565,9 @@ export interface ChatInputBoxAdapterProps {
   onOpenAgentSettings?: () => void;
   onOpenPromptSettings?: () => void;
   onOpenModelSettings?: (providerId?: string) => void;
-  onOpenCliSettings?: () => void;
+  onOpenCliSettings?: (
+    highlightTarget?: QoderSettingsHighlightTarget,
+  ) => void;
   onOpenFileReference?: (path: string) => void;
   onRefreshModelConfig?: (providerId?: string) => Promise<void> | void;
   isModelConfigRefreshing?: boolean;
@@ -1883,9 +1886,6 @@ export const ChatInputBoxAdapter = memo(forwardRef<ChatInputBoxHandle, ChatInput
       const sharedUnsupported = t("sharedSession.dshUnsupported", {
         defaultValue: "Not available in Shared Session",
       });
-      const qoderUnsupported = t("sharedSession.qoderUnsupported", {
-        defaultValue: "Not available in Shared Session",
-      });
       return {
         claude: resolveStatusLabel('claude'),
         codex: resolveStatusLabel('codex'),
@@ -1895,7 +1895,7 @@ export const ChatInputBoxAdapter = memo(forwardRef<ChatInputBoxHandle, ChatInput
         kimi: resolveStatusLabel('kimi'),
         pi: resolveStatusLabel('pi'),
         dsh: isSharedSession ? sharedUnsupported : resolveStatusLabel('dsh'),
-        qoder: isSharedSession ? qoderUnsupported : resolveStatusLabel('qoder'),
+        qoder: resolveStatusLabel('qoder'),
       } as const;
     }, [engines, isSharedSession, t]);
 

@@ -127,9 +127,23 @@ describe("sharedHideIdentity", () => {
     it("strips only known engines and leaves unrelated colons alone", () => {
       expect(stripKnownSharedEnginePrefix("claude:abc")).toBe("abc");
       expect(stripKnownSharedEnginePrefix("CODEX:xyz")).toBe("xyz");
+      expect(stripKnownSharedEnginePrefix("qoder:session")).toBe("session");
       expect(stripKnownSharedEnginePrefix("gemini:session")).toBe("gemini:session");
       expect(hasKnownSharedEnginePrefix("grok:session")).toBe(true);
+      expect(hasKnownSharedEnginePrefix("qoder:session")).toBe(true);
       expect(hasKnownSharedEnginePrefix("gemini:session")).toBe(false);
+    });
+  });
+
+  describe("Qoder distribution identity", () => {
+    it("does not let canonical Global/CN ids with the same raw session collide", () => {
+      const globalId = "qoder:__qoder_global__:same-raw-session";
+      const cnId = "qoder:__qoder_cn__:same-raw-session";
+      const globalKeys = new Set(collectSharedHideIdentityKeys(globalId));
+
+      expect([...globalKeys]).toEqual([globalId]);
+      expect(sharedHideIdentityIntersects(globalId, globalKeys)).toBe(true);
+      expect(sharedHideIdentityIntersects(cnId, globalKeys)).toBe(false);
     });
   });
 });

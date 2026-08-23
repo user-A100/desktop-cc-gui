@@ -53,8 +53,12 @@ export async function runDshDoctor(
 
 export async function runQoderDoctor(
   qoderBin: string | null,
+  providerProfileId?: string | null,
 ): Promise<CodexDoctorResult> {
-  return invoke<CodexDoctorResult>("qoder_doctor", { qoderBin });
+  return invoke<CodexDoctorResult>("qoder_doctor", {
+    qoderBin,
+    providerProfileId: providerProfileId ?? null,
+  });
 }
 
 export async function previewCodexLaunchProfile({

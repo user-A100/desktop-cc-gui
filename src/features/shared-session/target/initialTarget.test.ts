@@ -105,6 +105,32 @@ describe("buildLocalSharedSessionInitialTarget", () => {
       ),
     ).toThrow("Grok CLI");
   });
+
+  it("keeps the Qoder Global distribution as an explicit managed binding", () => {
+    expect(
+      buildLocalSharedSessionInitialTarget(
+        "qoder",
+        [
+          {
+            id: "qoder-global-model",
+            model: "qoder-global-model",
+            displayName: "Qoder Global model",
+            description: "",
+            isDefault: true,
+          },
+        ],
+        "本地配置",
+        "Qoder 没有可用 Model。",
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        engine: "qoder",
+        providerProfileId: "__qoder_global__",
+        providerProfileNameSnapshot: "Qoder Global",
+        providerProfileSource: "managed",
+      }),
+    );
+  });
 });
 
 describe("buildSharedSessionInitialTarget", () => {

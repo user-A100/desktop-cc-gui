@@ -1172,6 +1172,7 @@ describe("history loaders", () => {
     expect(loadQoderSession).toHaveBeenCalledWith(
       "/tmp/workspace",
       "019ffb7b-dedc-7b36-8d2f-f85f35501036",
+      "__qoder_global__",
     );
     expect(snapshot.engine).toBe("qoder");
     expect(snapshot.threadId).toBe("qoder:019ffb7b-dedc-7b36-8d2f-f85f35501036");
@@ -1189,6 +1190,23 @@ describe("history loaders", () => {
         text: "2",
       }),
     ]);
+  });
+
+  it("loads a canonical Qoder CN id through its raw ACP id and CN distribution", async () => {
+    const loadQoderSession = vi.fn().mockResolvedValue({ messages: [] });
+    const loader = createQoderHistoryLoader({
+      workspaceId: "ws-qoder",
+      workspacePath: "/tmp/workspace",
+      loadQoderSession,
+    });
+
+    await loader.load("qoder:__qoder_cn__:same-raw-session");
+
+    expect(loadQoderSession).toHaveBeenCalledWith(
+      "/tmp/workspace",
+      "same-raw-session",
+      "__qoder_cn__",
+    );
   });
 
   it("returns an empty qoder snapshot when workspace path is missing", async () => {

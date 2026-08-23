@@ -168,6 +168,7 @@ mod session_index;
 mod session_management;
 mod settings;
 mod shared;
+mod shared_binding_visibility;
 pub mod shared_context;
 pub mod shared_event_log;
 pub mod shared_projection;

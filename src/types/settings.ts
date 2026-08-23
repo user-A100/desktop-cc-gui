@@ -150,6 +150,9 @@ export type AppSettings = {
   kimiBin: string | null;
   piBin: string | null;
   qoderBin: string | null;
+  qoderConfigDir: string | null;
+  qoderCnBin: string | null;
+  qoderCnConfigDir: string | null;
   grokBin: string | null;
   opencodeBin: string | null;
   dshBin: string | null;

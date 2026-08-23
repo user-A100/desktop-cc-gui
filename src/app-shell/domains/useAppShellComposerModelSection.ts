@@ -117,11 +117,15 @@ export function useAppShellComposerModelSection({
       // Codex/Claude：允许会话级自由/自定义模型名（含本地配置、catalog 未登记项），
       // 避免 Atomic picker 选中后被 repair 静默回退。
       // DSH：账本是 host `{provider}/{model}`，切回时空/残留 catalog 不得回落默认。
+      // Qoder：Global/CN 共用一份 last-write catalog；切历史会话不准拉 ACP。
+      // 会话账本 modelId 必须保住，残留另一 distribution 的列表不得修成默认。
       allowUnknownActiveThreadModel:
         activeEngine === "codex" ||
         activeEngine === "claude" ||
         activeEngine === "dsh" ||
-        activeThreadEngine === "dsh",
+        activeThreadEngine === "dsh" ||
+        activeEngine === "qoder" ||
+        activeThreadEngine === "qoder",
       codexModels: effectiveModels,
       engineModelsAsOptions,
       engineSelectedModelIdByType,

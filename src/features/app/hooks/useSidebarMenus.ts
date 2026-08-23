@@ -52,6 +52,10 @@ import {
   KIMI_LOCAL_PROVIDER_PROFILE_ID,
   LOCAL_PROVIDER_PROFILE_DISPLAY_NAME,
   OPENCODE_LOCAL_PROVIDER_PROFILE_ID,
+  QODER_CN_PROVIDER_PROFILE_ID,
+  QODER_CN_PROVIDER_PROFILE_NAME,
+  QODER_GLOBAL_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_NAME,
   type EngineProviderProfileSelection,
   type EngineProviderProfileOption,
 } from "../../threads/constants/codexProviderProfiles";
@@ -87,6 +91,21 @@ const NEW_SESSION_ENGINE_ACTION_IDS: Readonly<Record<string, EngineType>> = {
 };
 
 type ProviderEngine = LastProviderEngine;
+
+const QODER_GLOBAL_PROFILE: EngineProviderProfileOption = {
+  id: QODER_GLOBAL_PROVIDER_PROFILE_ID,
+  name: QODER_GLOBAL_PROVIDER_PROFILE_NAME,
+  source: "managed",
+};
+const QODER_CN_PROFILE: EngineProviderProfileOption = {
+  id: QODER_CN_PROVIDER_PROFILE_ID,
+  name: QODER_CN_PROVIDER_PROFILE_NAME,
+  source: "managed",
+};
+const QODER_DISTRIBUTION_PROFILES: readonly EngineProviderProfileOption[] = [
+  QODER_GLOBAL_PROFILE,
+  QODER_CN_PROFILE,
+];
 
 export type ProviderContinuationDialogState = {
   workspaceId: string;
@@ -1483,6 +1502,16 @@ export function useSidebarMenus({
               statusLabel: t("sidebar.providerUnavailableLabel"),
             }
           : engineMeta;
+      const resolveQoderParentActionMeta = () => {
+        const engineMeta = resolveEngineActionMeta(workspace, "qoder");
+        // engineOptions 只汇报 Global 的单一 Qoder status，不能拿它阻断
+        // CN child；父项始终可打开二级选择。
+        return {
+          ...engineMeta,
+          unavailable: false,
+          statusLabel: null,
+        };
+      };
       const localProviderName = t("providers.localConfig", {
         defaultValue: LOCAL_PROVIDER_PROFILE_DISPLAY_NAME,
       });
@@ -1778,11 +1807,37 @@ export function useSidebarMenus({
           id: "new-session-qoder",
           label: t("workspace.engineQoder"),
           iconKind: "engine-qoder",
-          ...resolveEngineActionMeta(workspace, "qoder"),
-          onSelect: async () => {
-            const threadId = await runAddAgent("qoder");
-            await handleCreatedSession(threadId);
-          },
+          submenuTitle: t("sidebar.qoderDistributionChoiceTitle", {
+            defaultValue: "选择 Qoder 发行版",
+          }),
+          selectionHint: t("sidebar.qoderDistributionChoiceHint", {
+            defaultValue: "Global 与 CN 的账号、配置、模型彼此隔离",
+          }),
+          ...withProviderAvailability(
+            resolveQoderParentActionMeta(),
+            QODER_GLOBAL_PROFILE,
+          ),
+          submenuOnly: true,
+          onSelect: () => {},
+          children: QODER_DISTRIBUTION_PROFILES.map((profile) => ({
+            id: `new-session-qoder-distribution-${profile.id}`,
+            label: profile.name,
+            badgeLabel: t("sidebar.providerIsolatedConfigLabel"),
+            iconKind: "engine-qoder" as const,
+            ...withProviderAvailability(
+              profile.id === QODER_GLOBAL_PROVIDER_PROFILE_ID
+                ? resolveEngineActionMeta(workspace, "qoder")
+                : resolveQoderParentActionMeta(),
+              profile,
+            ),
+            onSelect: async () => {
+              const threadId = await runAddAgent(
+                "qoder",
+                creationProviderSelection(profile),
+              );
+              await handleCreatedSession(threadId);
+            },
+          })),
         },
         {
           id: "new-session-grok",

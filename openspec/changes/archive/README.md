@@ -10,6 +10,10 @@
 
 ## 2026-08
 
+### 2026-08-22
+
+- [`2026-08-22-fix-shared-owned-native-sidebar-leak`](2026-08-22-fix-shared-owned-native-sidebar-leak/proposal.md) — verified implementation，已同步 `shared-session-thread`、`shared-hide-list-prefilter`；Shared live Target 认主，Shared-owned Native 不得进侧栏；用户手测通过
+
 ### 2026-08-21
 
 - [`2026-08-20-add-runtime-model-receipt-to-turn-badge`](2026-08-20-add-runtime-model-receipt-to-turn-badge/proposal.md) — verified implementation，已同步 `turn-target-runtime-receipt`；Shared turn badge 同行高亮 `→ R` runtime 回执；Native CLI 不显示；点回执下滑出处

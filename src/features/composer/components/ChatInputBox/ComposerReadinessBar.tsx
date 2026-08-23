@@ -7,6 +7,7 @@ import type { ProviderModelGroup } from './modelOptions';
 import { ModelSelect } from './selectors/ModelSelect';
 import type { ProviderTargetGroup } from './hooks/useProviderTargetCatalogOwners';
 import type { ExecutionTarget } from '../../../shared-session/target/types';
+import type { QoderSettingsHighlightTarget } from '../../../app/hooks/useSettingsModalState';
 
 function parseContextChipCount(chip: string, prefix: string) {
   if (!chip.startsWith(prefix)) {
@@ -37,7 +38,9 @@ type ComposerReadinessBarProps = {
   onAddModel?: (providerId?: string) => void;
   onRefreshModelConfig?: () => Promise<void> | void;
   isModelConfigRefreshing?: boolean;
-  onOpenCliSettings?: () => void;
+  onOpenCliSettings?: (
+    highlightTarget?: QoderSettingsHighlightTarget,
+  ) => void;
   onReloadProviderConfig?: (
     providerId: ProviderId,
     providerProfileId: string,

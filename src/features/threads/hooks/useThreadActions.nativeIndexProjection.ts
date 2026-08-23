@@ -8,11 +8,13 @@ import { unionIndexWithNewerLastGood } from "./useThreadActions.lastGoodSnapshot
 import { mergePreservedSharedThreadsForIndexFirstPaint } from "./sharedNativeVisibility";
 import { stripHiddenSharedBindingSummaries } from "./useThreadActions.helpers";
 
+const DEFERRED_UNREADY_NATIVE_ENGINES = new Set(["grok", "pi", "qoder"]);
+
 /**
  * Native `listThreadsForWorkspace` projection extract.
  * Session Index is the sidebar read layer.
- * Hide unreadiness must not strip indexed natives: last-good hide if present,
- * otherwise full-show every Index row. Shared hide source is unchanged.
+ * Hide unreadiness keeps last-good / already-shown natives, but MUST NOT
+ * full-show newly scanned grok/pi/qoder rows until Shared hide is ready.
  */
 export function selectNativeSessionIndexRows<T>(rows: readonly T[]): T[] {
   return [...rows];
@@ -37,6 +39,23 @@ export function projectNativeIndexRowsToSummaries(
   );
 }
 
+export function shouldDeferNativeIndexRowUntilHideReady(
+  summary: Pick<ThreadSummary, "id" | "threadKind" | "engineSource">,
+  options: { hideReady: boolean; keepIds: ReadonlySet<string> },
+): boolean {
+  if (options.hideReady) {
+    return false;
+  }
+  if (summary.threadKind === "shared" || summary.id.startsWith("shared:")) {
+    return false;
+  }
+  const engine = summary.engineSource ?? "";
+  if (!DEFERRED_UNREADY_NATIVE_ENGINES.has(engine)) {
+    return false;
+  }
+  return !options.keepIds.has(summary.id);
+}
+
 export function buildNativeIndexEarlyPaintSummaries(params: {
   rows: readonly SessionIndexRow[];
   workspaceId: string;
@@ -44,8 +63,9 @@ export function buildNativeIndexEarlyPaintSummaries(params: {
   hideSet: Set<string>;
   currentThreads: ThreadSummary[] | undefined;
   lastGood: ThreadSummary[];
+  hideReady?: boolean;
 }): ThreadSummary[] {
-  return stripEmptyClaudeIndexFallbackSummaries(
+  const painted = stripEmptyClaudeIndexFallbackSummaries(
     stripHiddenSharedBindingSummaries(
       unionIndexWithNewerLastGood(
         mergePreservedSharedThreadsForIndexFirstPaint(
@@ -62,5 +82,19 @@ export function buildNativeIndexEarlyPaintSummaries(params: {
       ),
       params.hideSet,
     ),
+  );
+  if (params.hideReady !== false) {
+    return painted;
+  }
+  const keepIds = new Set<string>([
+    ...(params.currentThreads ?? []).map((thread) => thread.id),
+    ...params.lastGood.map((thread) => thread.id),
+  ]);
+  return painted.filter(
+    (summary) =>
+      !shouldDeferNativeIndexRowUntilHideReady(summary, {
+        hideReady: false,
+        keepIds,
+      }),
   );
 }

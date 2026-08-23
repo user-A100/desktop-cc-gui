@@ -2585,6 +2585,28 @@ describe("useThreadMessaging", () => {
     expect(interruptTurn).not.toHaveBeenCalled();
   });
 
+  it("routes a native Qoder CN interrupt to its persisted distribution binding", async () => {
+    const { result } = makeThreadMessagingHook("qoder", {
+      activeThreadId: "qoder:session-cn",
+      ensuredThreadId: "qoder:session-cn",
+      activeTurnIdByThread: { "qoder:session-cn": "turn-cn" },
+      threadEngineById: { "qoder:session-cn": "qoder" },
+      providerProfileByThread: { "qoder:session-cn": "__qoder_cn__" },
+    });
+
+    await act(async () => {
+      await result.current.interruptTurn();
+    });
+
+    expect(engineInterruptTurn).toHaveBeenCalledWith(
+      "ws-1",
+      "turn-cn",
+      "qoder",
+      "__qoder_cn__",
+    );
+    expect(engineInterrupt).not.toHaveBeenCalled();
+  });
+
   it("falls back to workspace interrupt when turn-scoped interrupt rpc is unavailable", async () => {
     vi.mocked(engineInterruptTurn).mockRejectedValue(
       new Error("unknown method: engine_interrupt_turn"),
@@ -2602,6 +2624,32 @@ describe("useThreadMessaging", () => {
     expect(engineInterruptTurn).toHaveBeenCalledWith("ws-1", "turn-9", "opencode");
     expect(engineInterrupt).toHaveBeenCalledWith("ws-1");
     expect(interruptTurn).not.toHaveBeenCalled();
+  });
+
+  it("does not broaden a Qoder CN interrupt when turn-scoped rpc is unavailable", async () => {
+    vi.mocked(engineInterruptTurn).mockRejectedValue(
+      new Error("unknown method: engine_interrupt_turn"),
+    );
+    const threadId = "qoder:__qoder_cn__:session-cn";
+    const { result } = makeThreadMessagingHook("qoder", {
+      activeThreadId: threadId,
+      ensuredThreadId: threadId,
+      activeTurnIdByThread: { [threadId]: "turn-cn" },
+      threadEngineById: { [threadId]: "qoder" },
+      providerProfileByThread: { [threadId]: "__qoder_cn__" },
+    });
+
+    await act(async () => {
+      await result.current.interruptTurn();
+    });
+
+    expect(engineInterruptTurn).toHaveBeenCalledWith(
+      "ws-1",
+      "turn-cn",
+      "qoder",
+      "__qoder_cn__",
+    );
+    expect(engineInterrupt).not.toHaveBeenCalled();
   });
 
   it("interrupt on cli-managed engine queues pending interrupt when turn id is not ready", async () => {

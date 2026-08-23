@@ -343,7 +343,6 @@ const workspace = {
   },
   sharedSession: {
     dshUnsupported: "Not available in Shared Session",
-    qoderUnsupported: "Not available in Shared Session",
   },
 };
 

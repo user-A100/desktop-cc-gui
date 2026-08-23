@@ -1761,16 +1761,16 @@ const settings = {
       qoderAuth: {
         sectionTitle: "Authentication",
         loginTitle: "Browser login",
-        loginHint: "Run qodercli login in the embedded terminal to complete browser auth",
-        loginDesc: "Account login · qodercli stores the browser token itself",
+        loginHint: "Run {{cliName}} login in the embedded terminal to complete browser auth",
+        loginDesc: "Account login · {{cliName}} stores the browser token itself",
         login: "Login",
         apiKeyTitle: "PAT",
-        apiKeyHint: "Saved to ~/.ccgui/qoder-auth.json and injected as QODER_PERSONAL_ACCESS_TOKEN",
+        apiKeyHint: "Saved to {{authFile}} and injected as {{envVar}}",
         configured: "Configured",
         notConfigured: "Not configured",
         envActive: "Environment variable active",
         envActiveHint:
-          "The process environment is active when mossx launches qodercli. Set a PAT to override it.",
+          "The process environment is active when mossx launches {{cliName}}. Set a PAT to override it.",
         setKey: "Set Key",
         overrideSet: "Override",
         edit: "Edit",
@@ -1782,9 +1782,9 @@ const settings = {
         keyPlaceholderKeep: "{{mask}} (leave empty to keep)",
         keyPlaceholderNew: "Paste {{env}}",
         toggleKeyVisibility: "Show / hide",
-        saveHint: "Writes ~/.ccgui/qoder-auth.json (0600) and injects it when launching qodercli",
+        saveHint: "Writes {{authFile}} (0600) and injects it when launching {{cliName}}",
         loadFailed: "Failed to read auth status",
-        resolutionOrder: "Resolution order: process env → qoder-auth.json → qodercli login",
+        resolutionOrder: "Resolution order: process env → {{authFile}} → {{cliName}} login",
       },
     },
     cliValidationTitle: "CLI Validation",
@@ -1828,9 +1828,9 @@ const settings = {
     piCliLifecycleHint:
       "Install or update the local PI CLI via npm package @earendil-works/pi-coding-agent. Auth and models stay in ~/.pi.",
     qoderDescription:
-      "Install and configure the Qoder CLI used by ccgui. Sign in with qodercli login; models come from the live ACP catalog.",
+      "One Qoder engine with isolated Global and CN distributions. Each distribution owns its CLI, config directory, account, PAT, and live ACP model catalog.",
     qoderCliLifecycleHint:
-      "Install or update the local Qoder CLI. Use Login below to run qodercli login, or set a PAT in the client.",
+      "Global uses qodercli; CN uses qoderclicn. Do not share config directories or PATs between them.",
     piAuth: {
       sectionTitle: "Provider authentication",
       oauthTitle: "Subscriptions",

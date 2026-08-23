@@ -1674,15 +1674,15 @@ const settings = {
       qoderAuth: {
         sectionTitle: "认证",
         loginTitle: "浏览器登录",
-        loginHint: "在内嵌终端运行 qodercli login，完成浏览器授权",
-        loginDesc: "账号登录 · 浏览器授权后由 qodercli 自管 token",
+        loginHint: "在内嵌终端运行 {{cliName}} login，完成浏览器授权",
+        loginDesc: "账号登录 · 浏览器授权后由 {{cliName}} 自管 token",
         login: "登录",
         apiKeyTitle: "PAT",
-        apiKeyHint: "写入 ~/.ccgui/qoder-auth.json，启动时注入 QODER_PERSONAL_ACCESS_TOKEN",
+        apiKeyHint: "写入 {{authFile}}，启动时注入 {{envVar}}",
         configured: "已配置",
         notConfigured: "未配置",
         envActive: "环境变量生效中",
-        envActiveHint: "环境变量生效中（mossx 启动 qodercli 时继承）。如需覆盖，请设置 PAT。",
+        envActiveHint: "环境变量生效中（mossx 启动 {{cliName}} 时继承）。如需覆盖，请设置 PAT。",
         setKey: "设置 Key",
         overrideSet: "覆盖设置",
         edit: "编辑",
@@ -1694,9 +1694,9 @@ const settings = {
         keyPlaceholderKeep: "{{mask}}（留空保持不变）",
         keyPlaceholderNew: "粘贴 {{env}}",
         toggleKeyVisibility: "显示 / 隐藏",
-        saveHint: "保存后写入 ~/.ccgui/qoder-auth.json（0600），启动 qodercli 时注入",
+        saveHint: "保存后写入 {{authFile}}（0600），启动 {{cliName}} 时注入",
         loadFailed: "读取认证状态失败",
-        resolutionOrder: "解析顺序：进程环境变量 → qoder-auth.json → qodercli login",
+        resolutionOrder: "解析顺序：进程环境变量 → {{authFile}} → {{cliName}} login",
       },
     },
     cliValidationTitle: "CLI 验证",
@@ -1735,9 +1735,9 @@ const settings = {
     piCliLifecycleHint:
       "通过 npm 包 @earendil-works/pi-coding-agent 安装或更新本机 PI CLI。认证与模型仍使用 ~/.pi。",
     qoderDescription:
-      "安装并配置 ccgui 使用的 Qoder CLI。请用 qodercli login 登录；模型来自 ACP 实时目录。",
+      "一个 Qoder 引擎，分为相互隔离的 Global 与 CN 发行版；各自拥有 CLI、配置目录、账号、PAT 和 ACP 实时模型目录。",
     qoderCliLifecycleHint:
-      "安装或更新本机 Qoder CLI。登录请用下方「登录」打开 qodercli login，或在客户端设置 PAT。",
+      "Global 使用 qodercli，CN 使用 qoderclicn；请勿混用配置目录或 PAT。",
     piAuth: {
       sectionTitle: "供应商认证",
       oauthTitle: "订阅授权",

@@ -159,6 +159,18 @@ pub(super) fn build_catalog_entry_stable_key(entry: &WorkspaceSessionCatalogEntr
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| entry.session_id.trim());
+    if engine == "qoder" {
+        let qoder_identity = engine::qoder_provider_profile::parse_qoder_native_session_identity(
+            session_identity,
+            entry.provider_profile_id.as_deref(),
+        );
+        if let Ok(identity) = qoder_identity {
+            return format!(
+                "qoder:{}:{}:{}",
+                entry.workspace_id, identity.provider_profile_id, identity.raw_session_id
+            );
+        }
+    }
     format!("{}:{}:{}", engine, entry.workspace_id, session_identity)
 }
 

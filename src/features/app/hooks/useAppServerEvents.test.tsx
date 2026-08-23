@@ -12,6 +12,10 @@ import {
   registerSharedSessionNativeBinding,
   resolveSharedSessionBindingByNativeThread,
 } from "../../shared-session/runtime/sharedSessionBridge";
+import {
+  QODER_CN_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_ID,
+} from "../../threads/constants/codexProviderProfiles";
 import { setSharedV2SendOverride } from "../../shared-session/runtime/sharedV2SendFlag";
 import {
   beginTurn,
@@ -988,6 +992,132 @@ describe("useAppServerEvents", () => {
     );
 
     clearSharedSessionBindingsForSharedThread("ws-shared-claude", "shared:thread-claude");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("does not open a native Grok row when two Shared Grok bindings are pending", async () => {
+    const handlers: Handlers = {
+      onThreadStarted: vi.fn(),
+      onThreadSessionIdUpdated: vi.fn(),
+    };
+    registerSharedSessionNativeBinding({
+      workspaceId: "ws-dual-grok",
+      sharedThreadId: "shared:thread-grok-a",
+      nativeThreadId: "grok-pending-shared-a",
+      engine: "grok",
+    });
+    registerSharedSessionNativeBinding({
+      workspaceId: "ws-dual-grok",
+      sharedThreadId: "shared:thread-grok-b",
+      nativeThreadId: "grok-pending-shared-b",
+      engine: "grok",
+    });
+    const { root } = await mount(handlers);
+
+    await act(async () => {
+      listener?.({
+        workspace_id: "ws-dual-grok",
+        message: {
+          method: "thread/started",
+          params: {
+            threadId: "grok:live-raw",
+            sessionId: "live-raw",
+            engine: "grok",
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(handlers.onThreadStarted).not.toHaveBeenCalled();
+    expect(handlers.onThreadSessionIdUpdated).not.toHaveBeenCalled();
+
+    clearSharedSessionBindingsForSharedThread("ws-dual-grok", "shared:thread-grok-a");
+    clearSharedSessionBindingsForSharedThread("ws-dual-grok", "shared:thread-grok-b");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("finalizes Qoder Global and CN pending bindings without native sidebar rows", async () => {
+    const handlers: Handlers = {
+      onThreadStarted: vi.fn(),
+      onThreadSessionIdUpdated: vi.fn(),
+    };
+    registerSharedSessionNativeBinding({
+      workspaceId: "ws-dual-qoder",
+      sharedThreadId: "shared:thread-qoder-global",
+      nativeThreadId: "qoder-pending-shared-global",
+      engine: "qoder",
+      providerProfileId: QODER_GLOBAL_PROVIDER_PROFILE_ID,
+    });
+    registerSharedSessionNativeBinding({
+      workspaceId: "ws-dual-qoder",
+      sharedThreadId: "shared:thread-qoder-cn",
+      nativeThreadId: "qoder-pending-shared-cn",
+      engine: "qoder",
+      providerProfileId: QODER_CN_PROVIDER_PROFILE_ID,
+    });
+    const { root } = await mount(handlers);
+
+    await act(async () => {
+      listener?.({
+        workspace_id: "ws-dual-qoder",
+        message: {
+          method: "thread/started",
+          params: {
+            threadId: "qoder-pending-shared-global",
+            sessionId: "same-raw",
+            engine: "qoder",
+            providerProfileId: QODER_GLOBAL_PROVIDER_PROFILE_ID,
+          },
+        },
+      });
+      listener?.({
+        workspace_id: "ws-dual-qoder",
+        message: {
+          method: "thread/started",
+          params: {
+            threadId: "qoder-pending-shared-cn",
+            sessionId: "same-raw",
+            engine: "qoder",
+            providerProfileId: QODER_CN_PROVIDER_PROFILE_ID,
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(handlers.onThreadStarted).not.toHaveBeenCalled();
+    expect(
+      resolveSharedSessionBindingByNativeThread(
+        "ws-dual-qoder",
+        `qoder:${QODER_GLOBAL_PROVIDER_PROFILE_ID}:same-raw`,
+      ),
+    ).toMatchObject({
+      sharedThreadId: "shared:thread-qoder-global",
+      providerProfileId: QODER_GLOBAL_PROVIDER_PROFILE_ID,
+    });
+    expect(
+      resolveSharedSessionBindingByNativeThread(
+        "ws-dual-qoder",
+        `qoder:${QODER_CN_PROVIDER_PROFILE_ID}:same-raw`,
+      ),
+    ).toMatchObject({
+      sharedThreadId: "shared:thread-qoder-cn",
+      providerProfileId: QODER_CN_PROVIDER_PROFILE_ID,
+    });
+
+    clearSharedSessionBindingsForSharedThread(
+      "ws-dual-qoder",
+      "shared:thread-qoder-global",
+    );
+    clearSharedSessionBindingsForSharedThread(
+      "ws-dual-qoder",
+      "shared:thread-qoder-cn",
+    );
     await act(async () => {
       root.unmount();
     });

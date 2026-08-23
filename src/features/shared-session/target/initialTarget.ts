@@ -8,7 +8,8 @@ import {
   LOCAL_PROVIDER_PROFILE_DISPLAY_NAME,
   OPENCODE_LOCAL_PROVIDER_PROFILE_ID,
   PI_LOCAL_PROVIDER_PROFILE_ID,
-  QODER_LOCAL_PROVIDER_PROFILE_ID,
+  QODER_GLOBAL_PROVIDER_PROFILE_NAME,
+  QODER_GLOBAL_PROVIDER_PROFILE_ID,
 } from "../../threads/constants/codexProviderProfiles";
 import type { SharedSessionSupportedEngine } from "../utils/sharedSessionEngines";
 
@@ -42,7 +43,7 @@ export function localProviderSentinelId(
     case "pi":
       return PI_LOCAL_PROVIDER_PROFILE_ID;
     case "qoder":
-      return QODER_LOCAL_PROVIDER_PROFILE_ID;
+      return QODER_GLOBAL_PROVIDER_PROFILE_ID;
   }
 }
 
@@ -50,6 +51,11 @@ export function isSharedCreateLocalProvider(
   engine: SharedSessionSupportedEngine,
   providerProfileId: string,
 ): boolean {
+  // Qoder Global/CN 是固定 runtime distribution；虽无供应商 CRUD，但也不能按
+  // disk local sentinel 处理，否则 ExecutionTarget 会丢掉 distribution identity。
+  if (engine === "qoder") {
+    return false;
+  }
   return providerProfileId.trim() === localProviderSentinelId(engine);
 }
 
@@ -119,8 +125,11 @@ export function buildLocalSharedSessionInitialTarget(
     models,
     provider: {
       id: localProviderSentinelId(engine),
-      name: localProviderName.trim() || LOCAL_PROVIDER_PROFILE_DISPLAY_NAME,
-      source: "disk",
+      name:
+        engine === "qoder"
+          ? QODER_GLOBAL_PROVIDER_PROFILE_NAME
+          : localProviderName.trim() || LOCAL_PROVIDER_PROFILE_DISPLAY_NAME,
+      source: engine === "qoder" ? "managed" : "disk",
     },
     unavailableModelMessage,
   });

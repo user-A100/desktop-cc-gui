@@ -5,6 +5,10 @@ import {
 import type { TurnExecutionSnapshot } from "../target/types";
 import type { SharedRuntimeControlOwner } from "../../../types/interaction";
 import type { EngineType } from "../../../types";
+import {
+  collectSharedHideIdentityKeys,
+  sharedHideIdentityIntersects,
+} from "./sharedHideIdentity";
 
 export type SharedSessionNativeBinding = {
   workspaceId: string;
@@ -46,6 +50,21 @@ function toBindingKey(binding: SharedSessionNativeBinding) {
   ]);
 }
 
+function nativeThreadIdsIntersect(left: string, right: string): boolean {
+  const candidate = left.trim();
+  const recorded = right.trim();
+  if (!candidate || !recorded) {
+    return false;
+  }
+  if (candidate === recorded) {
+    return true;
+  }
+  return sharedHideIdentityIntersects(
+    candidate,
+    new Set(collectSharedHideIdentityKeys(recorded)),
+  );
+}
+
 function findBindingsByNativeThread(
   workspaceId: string,
   nativeThreadId: string,
@@ -53,7 +72,7 @@ function findBindingsByNativeThread(
   return Array.from(sharedBindingsByNativeKey.entries()).filter(
     ([, binding]) =>
       binding.workspaceId === workspaceId &&
-      binding.nativeThreadId === nativeThreadId,
+      nativeThreadIdsIntersect(nativeThreadId, binding.nativeThreadId),
   );
 }
 
@@ -100,6 +119,40 @@ export function resolveSharedSessionBindingByNativeThread(
 ) {
   const matches = findBindingsByNativeThread(workspaceId, nativeThreadId);
   return matches.length === 1 ? toPublicBinding(matches[0][1]) : null;
+}
+
+export function hasPendingSharedSessionBindingForEngine(
+  workspaceId: string,
+  engine: SharedSessionSupportedEngine,
+): boolean {
+  const now = Date.now();
+  for (const binding of sharedBindingsByNativeKey.values()) {
+    if (binding.workspaceId !== workspaceId || binding.engine !== engine) {
+      continue;
+    }
+    if (!isPendingSharedNativeThreadId(engine, binding.nativeThreadId)) {
+      continue;
+    }
+    if (now - binding.registeredAtMs > PENDING_BINDING_STALE_MS) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+export function isSharedOwnedNativeThreadId(
+  workspaceId: string,
+  nativeThreadId: string,
+): boolean {
+  const id = nativeThreadId.trim();
+  if (!id || id.startsWith("shared:")) {
+    return false;
+  }
+  if (id.includes("-pending-shared-")) {
+    return true;
+  }
+  return resolveSharedSessionBindingByNativeThread(workspaceId, id) != null;
 }
 
 /**

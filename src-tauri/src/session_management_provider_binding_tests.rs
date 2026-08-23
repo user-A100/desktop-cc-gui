@@ -201,6 +201,193 @@ fn effective_engine_provider_profile_prefers_request_then_catalog_then_default()
 }
 
 #[test]
+fn qoder_provider_resolution_uses_canonical_identity_and_legacy_binding() {
+    let base = std::env::temp_dir().join(format!("qoder-provider-resolution-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp dir");
+    let storage_path = base.join("workspaces.json");
+    std::fs::write(&storage_path, "[]").expect("seed storage path");
+    let legacy_cn_binding = EngineProviderBinding {
+        provider_profile_id: "__qoder_cn__".to_string(),
+        provider_profile_source: "managed".to_string(),
+        provider_profile_name: "Qoder CN".to_string(),
+        provider_availability: "available".to_string(),
+    };
+    let legacy_metadata = WorkspaceSessionCatalogMetadata {
+        engine_provider_binding_by_session_key: HashMap::from([(
+            "qoder:ws-1:legacy-cn-session".to_string(),
+            legacy_cn_binding.clone(),
+        )]),
+        ..Default::default()
+    };
+    assert_eq!(
+        engine_provider_binding_for_session(
+            &legacy_metadata,
+            "ws-1",
+            "qoder:__qoder_cn__:legacy-cn-session",
+            "qoder",
+        ),
+        Some(legacy_cn_binding.clone())
+    );
+    assert!(engine_provider_binding_for_session(
+        &legacy_metadata,
+        "ws-1",
+        "qoder:__qoder_global__:legacy-cn-session",
+        "qoder",
+    )
+    .is_none());
+    with_catalog_metadata_mutation(&storage_path, "ws-1", |metadata| {
+        metadata.engine_provider_binding_by_session_key.insert(
+            "qoder:ws-1:legacy-cn-session".to_string(),
+            legacy_cn_binding.clone(),
+        );
+        Ok(())
+    })
+    .expect("seed legacy qoder binding");
+
+    let metadata = read_catalog_metadata(&storage_path, "ws-1").expect("read migrated metadata");
+    assert_eq!(
+        engine_provider_binding_for_session(
+            &metadata,
+            "ws-1",
+            "qoder:__qoder_cn__:legacy-cn-session",
+            "qoder",
+        ),
+        Some(legacy_cn_binding.clone())
+    );
+
+    assert_eq!(
+        resolve_engine_provider_profile_id(
+            &storage_path,
+            "ws-1",
+            Some("qoder:__qoder_cn__:same-raw-session"),
+            "qoder",
+            None,
+        )
+        .expect("resolve canonical CN")
+        .as_deref(),
+        Some("__qoder_cn__")
+    );
+    assert_eq!(
+        resolve_engine_provider_profile_id(
+            &storage_path,
+            "ws-1",
+            Some("qoder:legacy-cn-session"),
+            "qoder",
+            None,
+        )
+        .expect("resolve legacy CN binding")
+        .as_deref(),
+        Some("__qoder_cn__")
+    );
+    assert_eq!(
+        resolve_engine_provider_profile_id(
+            &storage_path,
+            "ws-1",
+            Some("qoder:legacy-cn-session"),
+            "qoder",
+            Some("__local_qoder__"),
+        )
+        .expect("legacy local sentinel must consult persisted CN binding")
+        .as_deref(),
+        Some("__qoder_cn__")
+    );
+    assert_eq!(
+        resolve_engine_provider_profile_id(
+            &storage_path,
+            "ws-1",
+            Some("qoder:legacy-cn-session"),
+            "qoder",
+            Some("__qoder_global__"),
+        )
+        .expect("explicit Global owner overrides legacy binding")
+        .as_deref(),
+        Some("__qoder_global__")
+    );
+
+    let global_binding = EngineProviderBinding {
+        provider_profile_id: "__qoder_global__".to_string(),
+        provider_profile_source: "managed".to_string(),
+        provider_profile_name: "Qoder Global".to_string(),
+        provider_availability: "available".to_string(),
+    };
+    let dual_distribution_metadata = WorkspaceSessionCatalogMetadata {
+        engine_provider_binding_by_session_key: HashMap::from([
+            (
+                "qoder:ws-1:__qoder_global__:same-raw-session".to_string(),
+                global_binding.clone(),
+            ),
+            (
+                "qoder:ws-1:__qoder_cn__:same-raw-session".to_string(),
+                legacy_cn_binding.clone(),
+            ),
+        ]),
+        ..Default::default()
+    };
+    assert_eq!(
+        engine_provider_binding_for_session(
+            &dual_distribution_metadata,
+            "ws-1",
+            "qoder:same-raw-session",
+            "qoder",
+        ),
+        Some(global_binding)
+    );
+    assert_eq!(
+        engine_provider_binding_for_session(
+            &dual_distribution_metadata,
+            "ws-1",
+            "qoder:__qoder_cn__:same-raw-session",
+            "qoder",
+        ),
+        Some(legacy_cn_binding.clone())
+    );
+    assert!(
+        resolve_engine_provider_profile_id(
+            &storage_path,
+            "ws-1",
+            Some("qoder:__qoder_cn__:same-raw-session"),
+            "qoder",
+            Some("__qoder_global__"),
+        )
+        .is_err()
+    );
+    std::fs::remove_dir_all(base).ok();
+}
+
+#[test]
+fn legacy_qoder_provider_resolution_rejects_unknown_binding() {
+    let base = std::env::temp_dir().join(format!("qoder-unknown-provider-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&base).expect("create temp dir");
+    let storage_path = base.join("workspaces.json");
+    std::fs::write(&storage_path, "[]").expect("seed storage path");
+    with_catalog_metadata_mutation(&storage_path, "ws-1", |metadata| {
+        metadata.engine_provider_binding_by_session_key.insert(
+            "qoder:ws-1:unknown-owner-session".to_string(),
+            EngineProviderBinding {
+                provider_profile_id: "provider-qoder".to_string(),
+                provider_profile_source: "managed".to_string(),
+                provider_profile_name: "Unknown Qoder".to_string(),
+                provider_availability: "available".to_string(),
+            },
+        );
+        Ok(())
+    })
+    .expect("seed unknown Qoder binding");
+
+    let error = resolve_engine_provider_profile_id(
+        &storage_path,
+        "ws-1",
+        Some("qoder:unknown-owner-session"),
+        "qoder",
+        None,
+    )
+    .expect_err("unknown Qoder binding must not fall back to Global");
+    assert!(error.contains("refusing Global fallback"));
+
+    std::fs::remove_dir_all(base).ok();
+}
+
+#[test]
 fn deleting_session_metadata_removes_provider_bindings() {
     let stable_key = "claude:ws-1:session-1".to_string();
     let binding = EngineProviderBinding {

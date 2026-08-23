@@ -18,6 +18,10 @@ export type SettingsSection =
   | "experimental"
   | "about";
 
+export type QoderSettingsHighlightTarget =
+  | "qoder-global"
+  | "qoder-cn";
+
 export type SettingsHighlightTarget =
   | "experimental-collaboration-modes"
   | "basic-open-apps"
@@ -30,7 +34,8 @@ export type SettingsHighlightTarget =
   | "mcp-servers"
   | "mcp-skills"
   | "runtime-pool"
-  | "cli-validation";
+  | "cli-validation"
+  | QoderSettingsHighlightTarget;
 
 export function useSettingsModalState() {
   const [settingsOpen, setSettingsOpen] = useState(false);

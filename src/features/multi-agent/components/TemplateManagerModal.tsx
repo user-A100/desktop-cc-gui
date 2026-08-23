@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import CircleHelp from "lucide-react/dist/esm/icons/circle-help";
 
 import { pushErrorToast } from "../../../services/toasts";
+import { useAtomicProviderTargetCatalog } from "../../composer/components/ChatInputBox/hooks/useProviderTargetCatalogOwners";
+import type { ProviderId } from "../../composer/components/ChatInputBox/types";
 import {
   cloneStage,
   createBlankTemplate,
@@ -61,6 +63,16 @@ export function TemplateManagerModal({
 }: TemplateManagerModalProps) {
   const { t } = useTranslation();
   const catalog = useTemplateCatalogSnapshot();
+  // 弹层单例 catalog：与 PromptEnhancerDialog 一样，选择器只消费 groups，打开菜单才拉模型。
+  const targetCatalog = useAtomicProviderTargetCatalog({
+    enabled: open,
+    mode: "shared",
+    currentProvider: "claude",
+    currentProviderProfileId: null,
+    resolveProviderLabel: (id: ProviderId) =>
+      t(`providers.${id}.label`, { defaultValue: id }),
+    kimiDisabledReason: "",
+  });
   const [activeId, setActiveId] = useState(
     initialTemplateId ?? catalog.selectedId,
   );
@@ -406,6 +418,7 @@ export function TemplateManagerModal({
                   />
                   <StageTargetPicker
                     value={stage.target}
+                    catalog={targetCatalog}
                     onChange={(target) => updateStage(index, { target })}
                   />
                   {!isCompleteAgentTargetForUi(stage.target) ? (

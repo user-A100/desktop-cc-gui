@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   clearSharedSessionBindingsForSharedThread,
+  hasPendingSharedSessionBindingForEngine,
+  isSharedOwnedNativeThreadId,
   registerSharedSessionNativeBinding,
   rebindSharedSessionNativeThread,
   resolvePendingSharedSessionBindingForEngine,
@@ -9,6 +11,7 @@ import {
   resolveSharedSessionBindingFromRuntimeOwner,
   resolveSharedRuntimeControlOwner,
 } from "./sharedSessionBridge";
+import { QODER_GLOBAL_PROVIDER_PROFILE_ID } from "../../threads/constants/codexProviderProfiles";
 
 describe("sharedSessionBridge", () => {
   it("routes Rust runtime owner metadata before frontend binding registration", () => {
@@ -433,5 +436,41 @@ describe("sharedSessionBridge", () => {
 
     clearSharedSessionBindingsForSharedThread("ws-8", "shared:thread-8a");
     clearSharedSessionBindingsForSharedThread("ws-8", "shared:thread-8b");
+  });
+
+  it("recognizes Qoder legacy aliases against a Global canonical binding", () => {
+    const canonicalId = `qoder:${QODER_GLOBAL_PROVIDER_PROFILE_ID}:raw-session`;
+    registerSharedSessionNativeBinding({
+      workspaceId: "ws-qoder-alias",
+      sharedThreadId: "shared:thread-qoder-alias",
+      nativeThreadId: canonicalId,
+      engine: "qoder",
+      providerProfileId: QODER_GLOBAL_PROVIDER_PROFILE_ID,
+    });
+
+    expect(
+      resolveSharedSessionBindingByNativeThread("ws-qoder-alias", canonicalId)
+        ?.sharedThreadId,
+    ).toBe("shared:thread-qoder-alias");
+    expect(
+      isSharedOwnedNativeThreadId("ws-qoder-alias", "qoder-pending-shared-x"),
+    ).toBe(true);
+    expect(hasPendingSharedSessionBindingForEngine("ws-qoder-alias", "qoder")).toBe(
+      false,
+    );
+
+    clearSharedSessionBindingsForSharedThread(
+      "ws-qoder-alias",
+      "shared:thread-qoder-alias",
+    );
+  });
+
+  it("does not treat a user Grok native as Shared-owned", () => {
+    expect(isSharedOwnedNativeThreadId("ws-user-grok", "grok:user-native")).toBe(
+      false,
+    );
+    expect(hasPendingSharedSessionBindingForEngine("ws-user-grok", "grok")).toBe(
+      false,
+    );
   });
 });

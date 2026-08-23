@@ -79,6 +79,14 @@ fn is_legacy_local_provider(engine: EngineType, provider_profile_id: &str) -> bo
 }
 
 fn provider_catalog_is_available(engine: EngineType, provider_profile_id: &str) -> bool {
+    // Qoder catalog is ACP runtime-only. Its Global/CN identities are still
+    // valid provider targets even when no static model list is cached.
+    if engine == EngineType::Qoder {
+        return crate::engine::qoder_provider_profile::qoder_distribution_from_provider_profile_id(
+            Some(provider_profile_id),
+        )
+        .is_ok();
+    }
     is_legacy_local_provider(engine, provider_profile_id)
         || matches!(
             crate::engine::status::get_provider_scoped_engine_models(
@@ -194,7 +202,7 @@ mod tests {
 
     #[test]
     fn projection_engine_covers_shared_cli_matrix_and_rejects_gemini() {
-        for engine in ["claude", "codex", "kimi", "grok", "opencode"] {
+        for engine in ["claude", "codex", "kimi", "grok", "opencode", "qoder"] {
             let snapshot = serde_json::json!({ "engine": engine })
                 .as_object()
                 .expect("snapshot object")
@@ -223,5 +231,19 @@ mod tests {
                 "{engine:?}"
             );
         }
+    }
+
+    #[test]
+    fn qoder_distribution_bindings_are_available_without_static_catalog() {
+        for profile_id in [
+            crate::engine::qoder_provider_profile::QODER_GLOBAL_PROVIDER_PROFILE_ID,
+            crate::engine::qoder_provider_profile::QODER_CN_PROVIDER_PROFILE_ID,
+        ] {
+            assert!(provider_catalog_is_available(EngineType::Qoder, profile_id));
+        }
+        assert!(!provider_catalog_is_available(
+            EngineType::Qoder,
+            "__missing-qoder-distribution__",
+        ));
     }
 }

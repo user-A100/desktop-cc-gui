@@ -24,12 +24,19 @@ import { resolveConversationAssemblyMigrationGate } from "../../threads/assembly
 import { hydrateToolSnapshotWithEventParams } from "../../threads/adapters/toolSnapshotHydration";
 import { isGeneratedImageToolName } from "../../../utils/generatedImageArtifacts";
 import {
+  hasPendingSharedSessionBindingForEngine,
   rebindSharedSessionNativeThread,
   resolvePendingSharedSessionBindingForEngine,
+  resolvePendingSharedSessionBindingForTarget,
   resolveSharedSessionBindingByNativeThread,
   resolveSharedSessionBindingFromRuntimeOwner,
   resolveSharedRuntimeControlOwner,
 } from "../../shared-session/runtime/sharedSessionBridge";
+import { isSharedSessionSupportedEngine } from "../../shared-session/utils/sharedSessionEngines";
+import {
+  canonicalQoderThreadId,
+  parseQoderSessionIdentity,
+} from "../../threads/utils/qoderSessionIdentity";
 import { isSharedV2SendEnabled } from "../../shared-session/runtime/sharedV2SendFlag";
 import type { SharedSessionNativeBinding } from "../../shared-session/runtime/sharedSessionBridge";
 import { getActiveTurnTargetForAttempt } from "../../shared-session/target/targetStore";
@@ -919,7 +926,7 @@ function shouldRebindSharedNativeThreadOnStartedEvent(
 ): boolean {
   // Claude 与 local CLIs 在 thread/started 上可能从 pending 占位收敛到
   // `engine:{sessionId}`；Codex 使用 raw thread id，不在此路径做前缀 rebind。
-  // Qoder 与 kimi 同约定（forwarder 以 `qoder:<sessionId>` 为终态 id）。
+  // Qoder 终态 id 额外带 distribution：`qoder:<profile>:<sessionId>`。
   return (
     engine === "claude" ||
     engine === "kimi" ||
@@ -928,6 +935,79 @@ function shouldRebindSharedNativeThreadOnStartedEvent(
     engine === "opencode" ||
     engine === "qoder"
   );
+}
+
+function readEventProviderProfileId(
+  params: Record<string, unknown>,
+  thread: Record<string, unknown> | null,
+): string | null {
+  const owner =
+    params.sharedOwner && typeof params.sharedOwner === "object"
+      ? (params.sharedOwner as Record<string, unknown>)
+      : null;
+  const snapshot =
+    owner?.executionTargetSnapshot &&
+    typeof owner.executionTargetSnapshot === "object"
+      ? (owner.executionTargetSnapshot as Record<string, unknown>)
+      : null;
+  const candidates = [
+    params.providerProfileId,
+    params.provider_profile_id,
+    thread?.providerProfileId,
+    thread?.provider_profile_id,
+    owner?.providerProfileId,
+    owner?.provider_profile_id,
+    snapshot?.providerProfileId,
+    snapshot?.provider_profile_id,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function resolveThreadStartedProviderProfileId(params: {
+  params: Record<string, unknown>;
+  thread: Record<string, unknown> | null;
+  threadId: string;
+  sessionId: string;
+  eventEngine: string | null;
+}): string | null {
+  const fromEvent = readEventProviderProfileId(params.params, params.thread);
+  if (fromEvent) {
+    return fromEvent;
+  }
+  if (params.eventEngine !== "qoder") {
+    return null;
+  }
+  for (const value of [params.threadId, params.sessionId]) {
+    const identity = parseQoderSessionIdentity(value);
+    if (identity && !identity.isLegacy) {
+      return identity.providerProfileId;
+    }
+  }
+  return null;
+}
+
+function resolveFinalizedSharedNativeThreadId(
+  eventEngine:
+    | "claude"
+    | "opencode"
+    | "codex"
+    | "gemini"
+    | "grok"
+    | "kimi"
+    | "pi"
+    | "qoder",
+  sessionId: string,
+  providerProfileId: string | null,
+): string | null {
+  if (eventEngine === "qoder") {
+    return canonicalQoderThreadId(sessionId, providerProfileId);
+  }
+  return `${eventEngine}:${sessionId}`;
 }
 
 function isAgentMessageSnapshotMethod(method: string): boolean {
@@ -2221,22 +2301,29 @@ export function dispatchAppServerEvent(
         ? rawEngine
         : null;
 
+    const eventProviderProfileId = resolveThreadStartedProviderProfileId({
+      params,
+      thread,
+      threadId,
+      sessionId,
+      eventEngine,
+    });
+    let skipNativeThreadStart = false;
     if (
       !sharedBridge &&
       threadId &&
       eventEngine &&
-      (eventEngine === "codex" ||
-        eventEngine === "claude" ||
-        eventEngine === "kimi" ||
-        eventEngine === "grok" ||
-        eventEngine === "pi" ||
-        eventEngine === "qoder" ||
-        eventEngine === "opencode")
+      isSharedSessionSupportedEngine(eventEngine)
     ) {
-      const pendingBinding = resolvePendingSharedSessionBindingForEngine(
-        workspace_id,
-        eventEngine,
-      );
+      const pendingBinding =
+        resolvePendingSharedSessionBindingForTarget(
+          workspace_id,
+          eventEngine,
+          eventProviderProfileId,
+        ) ??
+        (eventEngine === "qoder" && !eventProviderProfileId
+          ? resolvePendingSharedSessionBindingForEngine(workspace_id, eventEngine)
+          : null);
       if (pendingBinding) {
         if (pendingBinding.nativeThreadId !== threadId) {
           const rebound = rebindSharedSessionNativeThread({
@@ -2263,6 +2350,11 @@ export function dispatchAppServerEvent(
         } else {
           sharedBridge = pendingBinding;
         }
+      } else if (
+        hasPendingSharedSessionBindingForEngine(workspace_id, eventEngine)
+      ) {
+        // 同 engine 多条 pending 无法唯一认主时，禁止 Native 开行。
+        skipNativeThreadStart = true;
       }
     }
 
@@ -2275,8 +2367,12 @@ export function dispatchAppServerEvent(
         eventEngine !== "dsh" &&
         shouldRebindSharedNativeThreadOnStartedEvent(eventEngine)
       ) {
-        const finalizedNativeThreadId = `${eventEngine}:${sessionId}`;
-        if (threadId !== finalizedNativeThreadId) {
+        const finalizedNativeThreadId = resolveFinalizedSharedNativeThreadId(
+          eventEngine,
+          sessionId,
+          eventProviderProfileId ?? sharedBridge.providerProfileId ?? null,
+        );
+        if (finalizedNativeThreadId && threadId !== finalizedNativeThreadId) {
           const rebound = rebindSharedSessionNativeThread({
             workspaceId: workspace_id,
             oldNativeThreadId: threadId,
@@ -2298,6 +2394,9 @@ export function dispatchAppServerEvent(
       }
       return;
     }
+    if (skipNativeThreadStart) {
+      return;
+    }
 
     if (
       threadId &&
@@ -2306,15 +2405,25 @@ export function dispatchAppServerEvent(
       eventEngine &&
       threadId.startsWith(`${eventEngine}-pending-`)
     ) {
-      migrateThreadAgentEventTracking({
-        sourceThreadId: threadId,
-        targetThreadId: `${eventEngine}:${sessionId}`,
-        threadAgentDeltaSeenRef,
-        nestedTrackerRefs: [
-          threadAgentCompletedSeenRef,
-          threadAgentSnapshotSeenRef,
-        ],
-      });
+      const migratedThreadId =
+        eventEngine === "qoder"
+          ? resolveFinalizedSharedNativeThreadId(
+              eventEngine,
+              sessionId,
+              eventProviderProfileId,
+            )
+          : `${eventEngine}:${sessionId}`;
+      if (migratedThreadId) {
+        migrateThreadAgentEventTracking({
+          sourceThreadId: threadId,
+          targetThreadId: migratedThreadId,
+          threadAgentDeltaSeenRef,
+          nestedTrackerRefs: [
+            threadAgentCompletedSeenRef,
+            threadAgentSnapshotSeenRef,
+          ],
+        });
+      }
     }
 
     // If we have a real sessionId (not "pending"), notify for thread ID update

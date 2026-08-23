@@ -45,6 +45,42 @@ describe("sessionIndexThreadSummaries", () => {
     ).toBe("pi:p1");
   });
 
+  it("keeps Qoder Global/CN index rows with the same raw id distinct", () => {
+    const rows = sessionIndexRowsToThreadSummaries(
+      [
+        {
+          engine: "qoder",
+          sessionId: "same-raw-session",
+          title: "Global session",
+          updatedAt: 20,
+          providerProfileId: "__qoder_global__",
+        },
+        {
+          engine: "qoder",
+          sessionId: "same-raw-session",
+          title: "CN session",
+          updatedAt: 10,
+          providerProfileId: "__qoder_cn__",
+        },
+      ],
+      {
+        workspaceId: "ws",
+        mappedTitles: {},
+        getCustomName: () => "",
+        hiddenSharedBindingIds: new Set([
+          "qoder:__qoder_global__:same-raw-session",
+        ]),
+      },
+    );
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        id: "qoder:__qoder_cn__:same-raw-session",
+        providerProfileId: "__qoder_cn__",
+      }),
+    ]);
+  });
+
   it("builds thread summaries with custom titles", () => {
     const rows = sessionIndexRowsToThreadSummaries(
       [

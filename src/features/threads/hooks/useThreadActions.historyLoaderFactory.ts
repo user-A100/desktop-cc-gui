@@ -30,6 +30,7 @@ export function createThreadHistoryLoaderForThread({
   targetThreadId,
   workspaceId,
   workspacePath,
+  providerProfileId,
   preferLocalCodexHistory,
   onHistoryProgress,
   projectionTimeoutMs,
@@ -39,6 +40,7 @@ export function createThreadHistoryLoaderForThread({
   targetThreadId: string;
   workspaceId: string;
   workspacePath: string | null;
+  providerProfileId?: string | null;
   preferLocalCodexHistory: boolean;
   onHistoryProgress?: HistoryLoadingProgressListener;
   /** Shared projection soft-timeout (ms); see sharedHistoryLoader. */
@@ -108,6 +110,7 @@ export function createThreadHistoryLoaderForThread({
     return createQoderHistoryLoader({
       workspaceId,
       workspacePath,
+      providerProfileId,
       loadQoderSession: loadQoderSessionService,
       onProgress: onHistoryProgress,
     });

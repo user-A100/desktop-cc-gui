@@ -457,8 +457,11 @@ impl SharedRuntimeCoordinator {
         mut owner: SharedRuntimeAttemptOwner,
     ) -> Result<Option<SettledSharedRuntimeAttempt>, String> {
         if owner.native_session_id.is_some() {
-            owner.native_session_id =
-                normalize_native_session_identity(owner.engine, owner.native_session_id.as_deref());
+            owner.native_session_id = normalize_native_session_identity(
+                owner.engine,
+                Some(owner.provider_runtime_key.as_str()),
+                owner.native_session_id.as_deref(),
+            );
             if owner.native_session_id.is_none() {
                 return Err("shared runtime native session identity is empty".to_string());
             }
@@ -510,8 +513,11 @@ impl SharedRuntimeCoordinator {
                     attempt.owner.runtime_turn_id = Some(runtime_turn_id.to_string());
                 }
             }
-            if let Some(native_session_id) =
-                normalize_native_session_identity(attempt.owner.engine, native_session_id)
+            if let Some(native_session_id) = normalize_native_session_identity(
+                attempt.owner.engine,
+                Some(attempt.owner.provider_runtime_key.as_str()),
+                native_session_id,
+            )
             {
                 attempt.owner.native_session_id = Some(native_session_id);
             }
@@ -536,9 +542,12 @@ impl SharedRuntimeCoordinator {
             .attempts
             .get(attempt_id)
             .ok_or_else(|| format!("shared runtime attempt not registered: {attempt_id}"))?;
-        let native_session_id =
-            normalize_native_session_identity(attempt.owner.engine, Some(native_session_id))
-                .ok_or_else(|| "shared runtime native session identity is empty".to_string())?;
+        let native_session_id = normalize_native_session_identity(
+            attempt.owner.engine,
+            Some(attempt.owner.provider_runtime_key.as_str()),
+            Some(native_session_id),
+        )
+        .ok_or_else(|| "shared runtime native session identity is empty".to_string())?;
         let key = RuntimeIdentityKey {
             workspace_id: attempt.owner.workspace_id.clone(),
             engine: attempt.owner.engine,
@@ -1405,9 +1414,16 @@ fn normalize_engine_ingress(
                 runtime_turn_id: normalize_identity(runtime_turn_id).map(str::to_string),
                 native_session_id: normalize_native_session_identity(
                     engine,
+                    Some(provider_runtime_key),
                     Some(session_id.as_str()),
                 )
-                .or_else(|| normalize_native_session_identity(engine, native_session_id)),
+                .or_else(|| {
+                    normalize_native_session_identity(
+                        engine,
+                        Some(provider_runtime_key),
+                        native_session_id,
+                    )
+                }),
                 is_session_started: true,
                 actions,
                 agent_event: Some(event.clone()),
@@ -1422,7 +1438,11 @@ fn normalize_engine_ingress(
                 runtime_turn_id: normalize_identity(Some(turn_id.as_str()))
                     .or_else(|| normalize_identity(runtime_turn_id))
                     .map(str::to_string),
-                native_session_id: normalize_native_session_identity(engine, native_session_id),
+                native_session_id: normalize_native_session_identity(
+                    engine,
+                    Some(provider_runtime_key),
+                    native_session_id,
+                ),
                 is_session_started: false,
                 actions,
                 agent_event: Some(event.clone()),
@@ -1537,7 +1557,11 @@ fn normalize_engine_ingress(
         engine,
         provider_runtime_key: provider_runtime_key.to_string(),
         runtime_turn_id: normalize_identity(runtime_turn_id).map(str::to_string),
-        native_session_id: normalize_native_session_identity(engine, native_session_id),
+        native_session_id: normalize_native_session_identity(
+            engine,
+            Some(provider_runtime_key),
+            native_session_id,
+        ),
         is_session_started: false,
         actions,
         agent_event: (!suppress_agent_event).then(|| event.clone()),
@@ -2564,9 +2588,13 @@ fn normalize_identity(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn normalize_native_session_identity(engine: EngineType, value: Option<&str>) -> Option<String> {
+fn normalize_native_session_identity(
+    engine: EngineType,
+    provider_runtime_key: Option<&str>,
+    value: Option<&str>,
+) -> Option<String> {
     let normalized = normalize_identity(value)?;
-    // Claude / Kimi / Grok / OpenCode / Qoder：catalog 与 FE hide 使用 `engine:{raw}`。
+    // Claude / Kimi / Grok / OpenCode：catalog 与 FE hide 使用 `engine:{raw}`。
     // Codex 保持 raw thread id（无前缀）。pending 占位原样保留，避免误写成
     // `grok:grok-pending-shared-*`。
     match engine {
@@ -2574,8 +2602,7 @@ fn normalize_native_session_identity(engine: EngineType, value: Option<&str>) ->
         | EngineType::Kimi
         | EngineType::Pi
         | EngineType::Grok
-        | EngineType::OpenCode
-        | EngineType::Qoder => {
+        | EngineType::OpenCode => {
             let token = engine_token(engine);
             let prefix = format!("{token}:");
             if crate::shared_sessions::is_pending_shared_binding_thread_id(engine, normalized) {
@@ -2592,6 +2619,26 @@ fn normalize_native_session_identity(engine: EngineType, value: Option<&str>) ->
                 return Some(raw.to_string());
             }
             Some(format!("{prefix}{raw}"))
+        }
+        EngineType::Qoder => {
+            if crate::shared_sessions::is_pending_shared_binding_thread_id(engine, normalized) {
+                return Some(normalized.to_string());
+            }
+            let provider_profile_id = provider_runtime_key.and_then(
+                crate::engine::qoder_provider_profile::qoder_provider_profile_id_from_runtime_key,
+            );
+            let identity = crate::engine::qoder_provider_profile::parse_qoder_native_session_identity(
+                normalized,
+                provider_profile_id,
+            )
+            .ok()?;
+            // Runtime ingress 的 raw ACP session id 没有 distribution。只有明确
+            // 的 Qoder runtime key 才能把它升格为 durable Native identity；canonical
+            // identity 自带 profile，可用于兼容已经落盘的历史事件。
+            if provider_profile_id.is_none() && identity.is_legacy {
+                return None;
+            }
+            Some(identity.canonical_id())
         }
         EngineType::Codex | EngineType::Gemini | EngineType::Dsh => {
             Some(normalized.to_string())
@@ -2676,7 +2723,6 @@ mod tests {
             EngineType::Grok,
             EngineType::OpenCode,
             EngineType::Pi,
-            EngineType::Qoder,
         ] {
             let coordinator = SharedRuntimeCoordinator::default();
             let runtime_turn_id = format!("{}-turn-1", engine_token(engine));
@@ -2738,6 +2784,80 @@ mod tests {
             assert_eq!(
                 settled.owner.native_session_id.as_deref(),
                 Some(expected_native.as_str()),
+            );
+            assert_eq!(settled.final_snapshot.outcome, OutcomeStatus::Completed);
+        }
+    }
+
+    #[test]
+    fn qoder_same_raw_session_id_stays_isolated_by_runtime_distribution() {
+        let coordinator = SharedRuntimeCoordinator::default();
+        let raw_session_id = "same-qoder-session";
+        let cases = [
+            (
+                "attempt-qoder-global",
+                "qoder-global-turn",
+                "ws-1::qoder::global",
+                "__qoder_global__",
+                "qoder:__qoder_global__:same-qoder-session",
+            ),
+            (
+                "attempt-qoder-cn",
+                "qoder-cn-turn",
+                "ws-1::qoder::cn",
+                "__qoder_cn__",
+                "qoder:__qoder_cn__:same-qoder-session",
+            ),
+        ];
+
+        for (attempt_id, runtime_turn_id, provider_runtime_key, provider_profile_id, _) in cases {
+            let mut qoder_owner = owner(attempt_id, Some(runtime_turn_id), None);
+            qoder_owner.engine = EngineType::Qoder;
+            qoder_owner.provider_runtime_key = provider_runtime_key.to_string();
+            qoder_owner.binding_key = format!("qoder::{provider_profile_id}");
+            qoder_owner.execution_target_snapshot.engine = "qoder".to_string();
+            qoder_owner.execution_target_snapshot.provider_profile_id =
+                Some(provider_profile_id.to_string());
+            coordinator
+                .register_attempt(qoder_owner)
+                .expect("register Qoder owner");
+        }
+
+        for (_, runtime_turn_id, provider_runtime_key, _, _) in cases {
+            coordinator.ingest_engine_event_with_replay_scoped(
+                provider_runtime_key,
+                EngineType::Qoder,
+                Some(runtime_turn_id),
+                None,
+                &EngineEvent::SessionStarted {
+                    workspace_id: "ws-1".to_string(),
+                    session_id: raw_session_id.to_string(),
+                    engine: EngineType::Qoder,
+                    turn_id: Some(runtime_turn_id.to_string()),
+                },
+                Vec::new(),
+            );
+        }
+
+        for (_, runtime_turn_id, provider_runtime_key, _, expected_native) in cases {
+            let settled = coordinator
+                .ingest_engine_event_with_replay_scoped(
+                    provider_runtime_key,
+                    EngineType::Qoder,
+                    Some(runtime_turn_id),
+                    Some(raw_session_id),
+                    &EngineEvent::TurnCompleted {
+                        workspace_id: "ws-1".to_string(),
+                        result: Some(json!({ "status": "completed" })),
+                    },
+                    Vec::new(),
+                )
+                .settled
+                .expect("Qoder terminal settles matching distribution");
+
+            assert_eq!(
+                settled.owner.native_session_id.as_deref(),
+                Some(expected_native),
             );
             assert_eq!(settled.final_snapshot.outcome, OutcomeStatus::Completed);
         }
