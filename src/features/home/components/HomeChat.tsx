@@ -80,7 +80,7 @@ export function HomeChat({
   branchControl = null,
 }: HomeChatProps) {
   const { t } = useTranslation();
-  const heroRef = useRef<HTMLElement | null>(null);
+  const heroRef = useRef<HTMLDivElement | null>(null);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const engineLabel = getEngineLabel(selectedEngine);

@@ -33,7 +33,7 @@ const PARTICLE_OPTIONS: ParticleWordmarkOptions = {
 };
 
 interface ParticleWordmarkProps {
-  containerRef: RefObject<HTMLElement | null>;
+  containerRef: RefObject<HTMLDivElement | null>;
   enabled?: boolean;
 }
 
@@ -43,11 +43,19 @@ export function ParticleWordmark({
 }: ParticleWordmarkProps) {
   useEffect(() => {
     if (!enabled) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    // jsdom (unit tests) has no matchMedia — treat it as "no preference".
+    if (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    )
+      return;
     const container = containerRef.current;
     if (!container) return;
+    // Hoisted function declarations below would lose the null narrowing,
+    // so capture the container in a fresh const for the closures.
+    const root: HTMLElement = container;
 
-    const engine = new ParticleWordmarkEngine(container, PARTICLE_OPTIONS);
+    const engine = new ParticleWordmarkEngine(root, PARTICLE_OPTIONS);
     let cancelled = false;
 
     /**
@@ -57,29 +65,34 @@ export function ParticleWordmark({
      * the padding-free `.home-chat-hero` inside it.
      */
     function reserveLayout(): void {
-      const content = container.querySelector<HTMLElement>(
+      const content = root.querySelector<HTMLElement>(
         PARTICLE_OPTIONS.contentSelector,
       );
       if (!content) return;
       const height = content.getBoundingClientRect().height;
       if (height <= 0) return;
       const pad = ((PARTICLE_OPTIONS.zoom - 1) * height) / 2;
-      container.style.padding = `${pad}px 0`;
+      root.style.padding = `${pad}px 0`;
     }
 
     function releaseLayout(): void {
-      container.style.padding = "";
+      root.style.padding = "";
     }
 
     // Wait for web fonts so the title is rasterized with the final typeface.
     // The loading class hides the original wordmark during the async build
     // so it never flashes before the particle canvas takes over.
-    void document.fonts.ready.then(async () => {
+    // (jsdom has no FontFaceSet — fall back to building immediately.)
+    const fontsReady: Promise<unknown> =
+      typeof document.fonts?.ready?.then === "function"
+        ? document.fonts.ready
+        : Promise.resolve();
+    void fontsReady.then(async () => {
       if (cancelled) return;
       reserveLayout();
-      container.classList.add("home-chat-particle-loading");
+      root.classList.add("home-chat-particle-loading");
       const tookOver = await engine.build();
-      container.classList.remove("home-chat-particle-loading");
+      root.classList.remove("home-chat-particle-loading");
       if (cancelled) return;
       if (!tookOver) {
         releaseLayout();
@@ -105,7 +118,7 @@ export function ParticleWordmark({
       cancelled = true;
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       themeObserver.disconnect();
-      container.classList.remove("home-chat-particle-loading");
+      root.classList.remove("home-chat-particle-loading");
       engine.destroy();
       releaseLayout();
     };
