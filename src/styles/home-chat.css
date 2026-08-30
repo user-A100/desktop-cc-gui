@@ -79,6 +79,13 @@
   z-index: 1;
 }
 
+.home-chat-hero-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  max-width: 100%;
+}
+
 .home-chat-hero {
   display: flex;
   flex-direction: row;
@@ -86,6 +93,13 @@
   justify-content: center;
   gap: 16px;
   text-align: center;
+}
+
+/* Hide the original wordmark synchronously while the particle canvas
+   builds, so it never flashes before the particles take over. */
+.home-chat-particle-loading .home-chat-engine-mark,
+.home-chat-particle-loading .home-chat-headline {
+  visibility: hidden;
 }
 
 .home-chat-engine-mark {
